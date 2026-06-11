@@ -717,24 +717,12 @@ export class AccountPage {
       const grid = document.createElement('div');
       grid.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;';
 
-      // Fetch online statuses in parallel
-      const statuses = await Promise.allSettled(
-        devices.map(d => cloudApi.rawRequest('GET', 'device/online/status', { sn: d.sn }))
-      );
-
       for (let i = 0; i < devices.length; i++) {
-        const dev = devices[i];
-        const statusResp = statuses[i];
-        let online: boolean | null = null;
-        if (statusResp.status === 'fulfilled') {
-          const resp = statusResp.value;
-          if (resp.code === 100) {
-            // data is true/false boolean or 1/0 number
-            online = resp.data === true || resp.data === 1;
-          }
-          // If code is 567 or other WAF error, online stays null (unknown)
-        }
-        grid.appendChild(this.buildDeviceTile(dev, online));
+          const dev = devices[i];
+          // `device/bind/list` already includes online state; this avoids too many individual calls to `device/status` which causes you to get rate-limited if you do too many at one time.
+          const online =
+              dev.online === true ? true : dev.online === false ? false : null;
+          grid.appendChild(this.buildDeviceTile(dev, online));
       }
       this.content.appendChild(grid);
 
