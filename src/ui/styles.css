@@ -429,6 +429,19 @@ html[data-theme="light"] .auth-tab.active {
   color: #fff;
   font-size: 19px;
   line-height: 26px;
+  /* The G1 control screen overlays this bar directly on the live camera
+     feed (no dark 3D scene behind it like Go2), so white text washes out
+     on bright frames. A top-down dark scrim keeps it legible in dark mode;
+     the light-theme rule below replaces this with a solid white bar. */
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.5) 0%, rgba(0, 0, 0, 0) 100%);
+}
+
+/* Reinforce legibility of the bar's text/icons over arbitrary camera frames. */
+.nav-bar-title,
+.motor-temp-label,
+.net-type-label,
+.battery-text {
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
 }
 
 .nav-bar-left {
@@ -3340,6 +3353,13 @@ html[data-theme="light"] .nav-bar,
 html[data-theme="light"] .page-header {
   background: rgba(255, 255, 255, 0.9);
   border-bottom: 1px solid #d4d9e4;
+}
+/* The dark-mode scrim/text-shadow would muddy dark text on the white bar. */
+html[data-theme="light"] .nav-bar-title,
+html[data-theme="light"] .motor-temp-label,
+html[data-theme="light"] .net-type-label,
+html[data-theme="light"] .battery-text {
+  text-shadow: none;
 }
 html[data-theme="light"] .nav-divider {
   background: #c4cbd6;

@@ -52,6 +52,8 @@ export interface RobotStatus {
   hardwareVersion?: string;
   softwareVersion?: string;
   ipAddress?: string;
+  /** G1 machine/robot type number (rt/api/robot_type_service, api 1001). */
+  machineType?: number;
   motionMode: string;
   lidarState: string;
   selfTestResults: string[];
@@ -227,6 +229,7 @@ export class StatusPage {
     this.setVal('sys-firmware', s.firmwareVersion || '—');
     this.setVal('sys-hw',       s.hardwareVersion || this.system.hardwareVersion || '—');
     this.setVal('sys-sw',       s.softwareVersion || this.system.softwareVersion || '—');
+    this.setVal('sys-machine-type', s.machineType !== undefined ? String(s.machineType) : '—');
     this.setVal('sys-motion',   s.motionMode || 'Unknown');
 
     // Battery
@@ -315,6 +318,7 @@ export class StatusPage {
     if (family === 'G1') {
       systemRows.push(this.row('Hardware Version', 'sys-hw'));
       systemRows.push(this.row('Software Version', 'sys-sw'));
+      systemRows.push(this.row('Machine Type', 'sys-machine-type'));
     } else {
       systemRows.push(this.row('Package Version', 'sys-firmware'));
     }

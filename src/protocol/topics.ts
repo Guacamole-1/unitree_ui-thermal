@@ -3,6 +3,9 @@ export const RTC_TOPIC = {
   SPORT_MOD: 'rt/api/sport/request',
   OBSTACLES_AVOID: 'rt/api/obstacles_avoid/request',
   VUI: 'rt/api/vui/request',
+  // G1 voice service. The G1's speaker volume lives here (GET 1005 / SET 1006,
+  // scale 0-100), not on vui — vui 1004 never answers on G1.
+  VOICE: 'rt/api/voice/request',
   BASHRUNNER: 'rt/api/bashrunner/request',
   MOTION_SWITCHER: 'rt/api/motion_switcher/request',
   ROBOT_STATE: 'rt/api/robot_state/request',
@@ -53,10 +56,18 @@ export const RTC_TOPIC = {
   // imu_in_torso ("Body IMU") and imu_in_pelvis ("Crotch IMU") in one
   // frame.
   G1_ARM_REQUEST: 'rt/api/arm/request',
+  // G1 machine/robot-type query. Request api_id 1001 with {"version":""};
+  // response JSON carries { robot_type: "<number>" }. G1-only service.
+  ROBOT_TYPE: 'rt/api/robot_type_service/request',
   G1_ARM_ACTION_STATE: 'rt/arm/action/state',
   G1_DEX3_LEFT_STATE: 'rt/lf/dex3/left/state',
   G1_DEX3_RIGHT_STATE: 'rt/lf/dex3/right/state',
   BMS_STATE: 'rt/lf/bmsstate',
+  // G1/R1/H1 mainboard state. Carries the chassis ("Body") temperature the
+  // official webview status bar shows — temperature[0], signed-byte. Go2 has
+  // no mainboard topic; its body temp rides in lowstate as temperature_ntc1.
+  // Verified against index-CtgArt9k.js (MAIN_BOARD_STATE = rt/lf/mainboardstate).
+  MAIN_BOARD_STATE: 'rt/lf/mainboardstate',
   // The second (pelvis / "Crotch") IMU. The body IMU rides inside the
   // regular lowstate envelope's imu_state field on G1, while the
   // pelvis IMU is published as its own G1ImuState payload on this

@@ -2,6 +2,10 @@ import type { RobotFamily } from '../../api/unitree-cloud';
 import type { InputSource, InputSourceKind } from './side-buttons';
 import { AudioPlayer, type AudioPlayerCallbacks } from './audio-player';
 
+/** Robot speaker volume is stored 0–10; both official apps show it ×10 as a
+ *  percentage (0 → "0%", 10 → "100%"). */
+const volumePercent = (v: number): string => `${v * 10}%`;
+
 export interface SettingsState {
   radarOn: boolean;
   lidarOn: boolean;
@@ -132,6 +136,9 @@ export class SettingsPage {
         this.volumeSliderEl = slider;
         this.volumeValueEl = value;
       },
+      // The robot stores volume 0–10; both official apps display it as a
+      // percentage (×10), matching the speaker-volume read-out.
+      volumePercent,
     ));
     if (!isG1) {
       multimedia.appendChild(this.buildSliderSection(
@@ -279,7 +286,7 @@ export class SettingsPage {
     if (partial.volume !== undefined) {
       this.state.volume = partial.volume;
       if (this.volumeSliderEl) this.volumeSliderEl.value = String(partial.volume);
-      if (this.volumeValueEl) this.volumeValueEl.textContent = String(partial.volume);
+      if (this.volumeValueEl) this.volumeValueEl.textContent = volumePercent(partial.volume);
     }
     if (partial.brightness !== undefined) {
       this.state.brightness = partial.brightness;
@@ -360,6 +367,7 @@ export class SettingsPage {
     initial: number,
     onChange: (val: number) => void,
     register: (slider: HTMLInputElement, value: HTMLSpanElement) => void,
+    formatValue: (v: number) => string = String,
   ): HTMLElement {
     const section = document.createElement('div');
     section.className = 'settings-section settings-section-slider';
@@ -380,7 +388,7 @@ export class SettingsPage {
 
     const value = document.createElement('span');
     value.className = 'settings-slider-value';
-    value.textContent = String(initial);
+    value.textContent = formatValue(initial);
     head.appendChild(value);
 
     section.appendChild(head);
@@ -393,7 +401,7 @@ export class SettingsPage {
     range.value = String(initial);
     range.addEventListener('input', () => {
       const val = parseInt(range.value, 10);
-      value.textContent = String(val);
+      value.textContent = formatValue(val);
       onChange(val);
     });
     section.appendChild(range);

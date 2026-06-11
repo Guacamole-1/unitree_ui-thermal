@@ -58,6 +58,14 @@ function friendlyConnectError(raw: string): string {
   return raw;
 }
 
+// Robot temperatures are transported as signed bytes but often arrive as
+// unsigned (0-255). The official webview reinterprets anything > 127 as
+// negative (x - 256) — matches index-CtgArt9k.js m(x). Keeps sub-zero
+// readings correct and clamps garbage frames.
+function signByte(t: number): number {
+  return t > 127 ? t - 256 : t;
+}
+
 export class App {
   private root: HTMLElement;
   private currentScreen: Screen = 'landing';
@@ -613,8 +621,13 @@ export class App {
     }
 
     // Fetch initial states
-    this.publishRequestLogged(RTC_TOPIC.VUI, 1004, undefined, { label: 'vui/get-volume' });
-    this.publishRequestLogged(RTC_TOPIC.VUI, 1006, undefined, { label: 'vui/get-brightness' });
+    if (cloudApi.connectFamily === 'G1') {
+      // G1 volume is on the voice service; no head lamp (skip vui brightness).
+      this.publishRequestLogged(RTC_TOPIC.VOICE, 1005, '', { label: 'voice/get-volume' });
+    } else {
+      this.publishRequestLogged(RTC_TOPIC.VUI, 1004, undefined, { label: 'vui/get-volume' });
+      this.publishRequestLogged(RTC_TOPIC.VUI, 1006, undefined, { label: 'vui/get-brightness' });
+    }
     this.publishRequestLogged(RTC_TOPIC.OBSTACLES_AVOID, 1002, undefined, { label: 'obstacles_avoid/get-state' });
   }
 
@@ -712,8 +725,14 @@ export class App {
    *
    *  Used on Settings-page entry and on every drawer open. */
   private probeSettingsState(): void {
-    this.publishRequestLogged(RTC_TOPIC.VUI, 1004, undefined, { label: 'vui/get-volume' });
-    this.publishRequestLogged(RTC_TOPIC.VUI, 1006, undefined, { label: 'vui/get-brightness' });
+    if (cloudApi.connectFamily === 'G1') {
+      // G1's speaker volume is on the voice service (GET 1005); vui 1004
+      // never answers on G1. G1 has no head lamp, so skip vui brightness.
+      this.publishRequestLogged(RTC_TOPIC.VOICE, 1005, '', { label: 'voice/get-volume' });
+    } else {
+      this.publishRequestLogged(RTC_TOPIC.VUI, 1004, undefined, { label: 'vui/get-volume' });
+      this.publishRequestLogged(RTC_TOPIC.VUI, 1006, undefined, { label: 'vui/get-brightness' });
+    }
     this.publishRequestLogged(RTC_TOPIC.OBSTACLES_AVOID, 1002, undefined, { label: 'obstacles_avoid/get-state' });
     this.publishRequestLogged(RTC_TOPIC.PERMISSION_NET, 1001, undefined, { label: 'permission_net/get' });
     if (cloudApi.connectFamily !== 'G1') {
@@ -1173,6 +1192,10 @@ export class App {
       this.dataHandler.subscribe(RTC_TOPIC.BMS_STATE);
       this.dataHandler.subscribe(RTC_TOPIC.SECONDARY_IMU);
       this.dataHandler.subscribe(RTC_TOPIC.G1_ARM_ACTION_STATE);
+      // Body/chassis temperature for the status bar — G1 carries it on the
+      // mainboard topic (temperature[0]), not in the IMU. Go2 reads it from
+      // lowstate.temperature_ntc1, handled inline in handleLowState.
+      this.dataHandler.subscribe(RTC_TOPIC.MAIN_BOARD_STATE);
     } else {
       this.dataHandler.subscribe(RTC_TOPIC.ROBOT_ODOM);
       this.dataHandler.subscribe(RTC_TOPIC.LIDAR_ARRAY);
@@ -1207,6 +1230,9 @@ export class App {
       this.runBashScript('get_hardware_version.sh');
       this.runBashScript('get_software_version.sh');
       this.runBashScript('get_ip_address.sh');
+      // Machine/robot type (G1-only service). Mirrors G1dInfoViewModel:
+      // api_id 1001, param {"version":""}; response has robot_type.
+      this.publishRequestLogged(RTC_TOPIC.ROBOT_TYPE, 1001, JSON.stringify({ version: '' }), { label: 'robot_type/get' });
     }
   }
 
@@ -1326,11 +1352,13 @@ export class App {
 
       if (msg.topic === 'rt/api/audiohub/response') { this.handleAudiohubResponse(msg.data); return; }
       if (msg.topic === 'rt/api/vui/response') { this.handleVuiResponse(msg.data); return; }
+      if (msg.topic === 'rt/api/voice/response') { this.handleVoiceResponse(msg.data); return; }
       if (msg.topic === 'rt/api/obstacles_avoid/response') { this.handleObstacleResponse(msg.data); return; }
       if (msg.topic === 'rt/api/rm_con/response') { this.handlePermissionNetResponse(msg.data); return; }
       if (msg.topic === 'rt/api/bashrunner/response') { this.handleBashrunnerResponse(msg.data); return; }
       if (msg.topic === 'rt/api/motion_switcher/response') { this.handleMotionSwitcherResponse(msg.data); return; }
       if (msg.topic === 'rt/api/robot_state/response') { this.handleRobotStateResponse(msg.data); return; }
+      if (msg.topic === 'rt/api/robot_type_service/response') { this.handleRobotTypeResponse(msg.data); return; }
       // sport/arm/loco responses have no further handling — logResponse
       // above is the entire story for these topics.
       if (
@@ -1359,6 +1387,9 @@ export class App {
         break;
       case RTC_TOPIC.SECONDARY_IMU:
         this.handleSecondaryImu(msg.data);
+        break;
+      case RTC_TOPIC.MAIN_BOARD_STATE:
+        this.handleMainBoardState(msg.data);
         break;
       case RTC_TOPIC.ROBOT_ODOM:
         this.handleRobotOdom(msg.data);
@@ -1430,10 +1461,19 @@ export class App {
         // Filter to finite numbers before Math.max — a dropped frame can
         // surface as NaN/undefined and pollute the navbar.
         const tempArr = Array.isArray(m.temperature) ? m.temperature : undefined;
-        const finiteArr = tempArr ? tempArr.filter((t): t is number => Number.isFinite(t)) : undefined;
-        const tempScalar = finiteArr && finiteArr.length > 0
-          ? Math.max(...finiteArr)
-          : (Number.isFinite(m.temperature as number) ? (m.temperature as number) : 0);
+        // 'Max Motor Temp' in the status bar mirrors the official webview:
+        // G1 uses the winding temperature (temperature[1]), Go2 the scalar —
+        // both signed-byte corrected. Fall back to casing[0] if winding is
+        // absent on a dropped frame. (index-CtgArt9k.js: G1 p()=temperature[1],
+        // Go2 f()=temperature, both via m(x)=x>127?x-256:x.)
+        let tempScalar = 0;
+        if (tempArr) {
+          const winding = Number.isFinite(tempArr[1]) ? tempArr[1]
+                        : (Number.isFinite(tempArr[0]) ? tempArr[0] : undefined);
+          if (winding !== undefined) tempScalar = signByte(winding);
+        } else if (Number.isFinite(m.temperature as number)) {
+          tempScalar = signByte(m.temperature as number);
+        }
         return {
           q: m.q ?? 0,
           dq: m.dq ?? 0,
@@ -1512,8 +1552,16 @@ export class App {
 
     if (d.foot_force) this.robotState.footForce = d.foot_force;
     if (d.imu_state?.temperature !== undefined) {
+      // IMU temperature is its own metric (Status page "IMU Temperature" row),
+      // distinct from the chassis/body temperature the status bar shows. Keep
+      // it for the Status page but don't feed it to the body-temp readout.
       this.robotState.imuTemp = d.imu_state.temperature;
-      this.navBar?.setBodyTemp(d.imu_state.temperature);
+    }
+    // Body/chassis temperature for the status bar. The official webview reads
+    // it from lowstate.temperature_ntc1 on Go2 (signed byte); on G1 it arrives
+    // on the mainboard topic instead — see handleMainBoardState.
+    if (cloudApi.connectFamily !== 'G1' && typeof d.temperature_ntc1 === 'number') {
+      this.navBar?.setBodyTemp(signByte(d.temperature_ntc1));
     }
     // On G1 the lowstate's imu_state IS the torso ("Body") IMU. The
     // Status panel's Body IMU section reads from robotState.bodyImu, so
@@ -1541,6 +1589,18 @@ export class App {
     this.robotState.crotchImu = { rpy, temp: typeof i.temperature === 'number' ? i.temperature : 0 };
     if (this.currentScreen === 'status' && this.statusPage) {
       this.statusPage.update(this.robotState);
+    }
+  }
+
+  // G1/R1/H1 mainboard state (rt/lf/mainboardstate). The official webview's
+  // status-bar body temperature is temperature[0] from this topic (signed
+  // byte), NOT the IMU temperature. Go2 has no mainboard topic — it uses
+  // lowstate.temperature_ntc1 instead (handled in handleLowState).
+  private handleMainBoardState(data: unknown): void {
+    const d = data as { temperature?: number[] };
+    const t = Array.isArray(d.temperature) ? d.temperature[0] : undefined;
+    if (typeof t === 'number' && Number.isFinite(t)) {
+      this.navBar?.setBodyTemp(signByte(t));
     }
   }
 
@@ -1619,6 +1679,25 @@ export class App {
         this.settingsPage?.setState({ brightness: parsed.brightness });
         this.settingsDrawer?.setState({ brightness: parsed.brightness });
       }
+    } catch { /* malformed */ }
+  }
+
+  /** G1 voice-service response. The G1 speaker volume lives here (GET api_id
+   *  1005) on a 0-100 scale; normalise to our 0-10 slider (÷10). */
+  private handleVoiceResponse(data: unknown): void {
+    const d = data as {
+      header?: { identity?: { api_id?: number }; status?: { code?: number } };
+      data?: string;
+    };
+    if (d.header?.status?.code !== 0 || typeof d.data !== 'string') return;
+    if (d.header?.identity?.api_id !== 1005) return;
+    try {
+      const parsed = JSON.parse(d.data) as { volume?: number };
+      if (parsed.volume === undefined) return;
+      const level = Math.round(parsed.volume / 10); // 0-100 → 0-10
+      this.settingsState.volume = level;
+      this.settingsPage?.setState({ volume: level });
+      this.settingsDrawer?.setState({ volume: level });
     } catch { /* malformed */ }
   }
 
@@ -1756,12 +1835,13 @@ export class App {
         break;
       }
       case 'get_hardware_version.sh': {
-        // BaseInfoViewModel.kt:232 formats as "2" + (n/10) + "." + (n%10),
-        // i.e. info=10 -> "2.1.0", info=12 -> "2.1.2".
+        // G1 BaseInfoViewModel/G1dInfoViewModel format the version as
+        // (info/10) + "." + (info%10) — e.g. info=10 -> "1.0", info=12 -> "1.2".
+        // (Our earlier "2.x.x" form added a spurious leading "2.".)
         const raw = typeof info === 'string' ? info : typeof info === 'number' ? String(info) : '';
         const n = parseInt(raw, 10);
         if (!Number.isNaN(n)) {
-          this.robotState.hardwareVersion = `2.${Math.floor(n / 10)}.${n % 10}`;
+          this.robotState.hardwareVersion = `${Math.floor(n / 10)}.${n % 10}`;
         }
         break;
       }
@@ -1871,6 +1951,27 @@ export class App {
         } catch { /* ignore */ }
       }
       this.requestServiceReport();
+    }
+  }
+
+  /** G1 machine/robot-type response (rt/api/robot_type_service, api 1001).
+   *  Payload JSON carries `robot_type` as a string number; store it and
+   *  refresh the Status → System tile. */
+  private handleRobotTypeResponse(data: unknown): void {
+    const d = data as { data?: unknown };
+    try {
+      let inner: any = d?.data;
+      if (typeof inner === 'string') inner = JSON.parse(inner);
+      const raw = inner?.robot_type;
+      const num = typeof raw === 'number' ? raw : parseInt(String(raw), 10);
+      if (!Number.isNaN(num)) {
+        this.robotState.machineType = num;
+        if (this.currentScreen === 'status' && this.statusPage) {
+          this.statusPage.update(this.robotState);
+        }
+      }
+    } catch (err) {
+      log.ui.error('robot_type parse failed:', err);
     }
   }
 
@@ -2458,11 +2559,21 @@ export class App {
 
   private sendVolume(level: number): void {
     this.settingsState.volume = level;
-    this.publishRequestLogged(
-      RTC_TOPIC.VUI, 1003,
-      JSON.stringify({ volume: level }),
-      { label: `vui/set-volume ${level}` },
-    );
+    if (cloudApi.connectFamily === 'G1') {
+      // G1 speaker volume is on the voice service, scale 0-100; map our 0-10
+      // slider level back up (×10).
+      this.publishRequestLogged(
+        RTC_TOPIC.VOICE, 1006,
+        JSON.stringify({ volume: level * 10 }),
+        { label: `voice/set-volume ${level * 10}` },
+      );
+    } else {
+      this.publishRequestLogged(
+        RTC_TOPIC.VUI, 1003,
+        JSON.stringify({ volume: level }),
+        { label: `vui/set-volume ${level}` },
+      );
+    }
   }
 
   /** Toggle the dog's RF remote-control radio. APK fires

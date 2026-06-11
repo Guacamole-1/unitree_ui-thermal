@@ -774,6 +774,28 @@ function injectStyles(): void {
 .aud-modal-footer button { flex:1 1 0; border:none; background:none; cursor:pointer; font-size:15px; line-height:42px; }
 .aud-modal-cancel { color:#ec5e5e; border-right:1px solid rgba(151,151,151,.18); }
 .aud-modal-confirm { color:#7483e4; }
+
+/* ── Light theme ─────────────────────────────────────────────────────────
+   The player ships with dark surfaces; remap them to the app's light
+   palette (surfaces #fff/#eef0f6, borders #d4d9e4, text #1a1d23/#5a6170).
+   Accent gradients (record/upload/loop) read fine on both themes. */
+html[data-theme="light"] .aud-player { background:#eef0f6; }
+html[data-theme="light"] .aud-timer { color:#5a6170; }
+html[data-theme="light"] .aud-list { background:#ffffff; border-color:#d4d9e4;
+  box-shadow:inset 0 2px 6px rgba(60,75,120,.08); scrollbar-color:#6879e4 #e3e6ef; }
+html[data-theme="light"] .aud-list::-webkit-scrollbar-track { background:#e3e6ef; }
+html[data-theme="light"] .aud-list::-webkit-scrollbar-thumb { border-color:#e3e6ef; }
+html[data-theme="light"] .aud-empty { color:#5a6170; }
+html[data-theme="light"] .aud-item-wrap { background:#e2e5ef; }
+html[data-theme="light"] .aud-item { background:#ffffff; box-shadow:0 1px 3px rgba(60,75,120,.1); }
+html[data-theme="light"] .aud-name-text { color:#1a1d23; }
+html[data-theme="light"] .aud-datetime { color:#5a6170; }
+html[data-theme="light"] .aud-play span { background-color:#5a6170 !important; }
+/* rename modal */
+html[data-theme="light"] .aud-modal { background:#ffffff; box-shadow:0 8px 30px rgba(60,75,120,.25); }
+html[data-theme="light"] .aud-modal-title { color:#1a1d23; border-bottom-color:#e0e3ec; }
+html[data-theme="light"] .aud-modal-input { background:#f2f3f7; color:#1a1d23; border:1px solid #c4cbd6; }
+html[data-theme="light"] .aud-modal-footer { border-top-color:#e0e3ec; }
 `;
   const style = document.createElement('style');
   style.setAttribute('data-aud-player', '');
