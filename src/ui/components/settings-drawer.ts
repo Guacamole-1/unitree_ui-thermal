@@ -98,6 +98,16 @@ export class SettingsDrawer {
     this.inner.setState(partial);
   }
 
+  /** Re-fetch the audio library list (called when the drawer opens). */
+  refreshAudio(): void {
+    this.inner.refreshAudio();
+  }
+
+  /** Push a robot play-state update into the audio player. */
+  setAudioPlayState(state: { is_playing?: boolean; current_audio_unique_id?: string | null }): void {
+    this.inner.setAudioPlayState(state);
+  }
+
   destroy(): void {
     document.removeEventListener('keydown', this.keydownHandler);
     if (this.mounted) {

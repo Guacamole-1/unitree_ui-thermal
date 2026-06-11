@@ -30,6 +30,7 @@ import { ErrorStore } from '../protocol/error-store';
 import { ErrorsBadge } from './components/errors-badge';
 import { ErrorToastHost } from './components/error-toast';
 import { ErrorsPage } from './components/errors-page';
+import { AudioRecorder, convertFileToWav } from './audio-recorder';
 import type { WebRTCConnection } from '../connection/webrtc';
 import type { Scene3D } from './scene/scene';
 
@@ -80,6 +81,17 @@ export class App {
   // drawer, which also hosts BT-remote / gamepad selection (replaces
   // the old SettingBar and the standalone input-source picker).
   private settingsDrawer: SettingsDrawer | null = null;
+
+  // Audio support
+  private audioEl: HTMLAudioElement | null = null;
+  private pttActive = false;
+  private audioRecorder: AudioRecorder | null = null;
+  private audioMonitorActive = false;
+  /** In-flight audiohub requests keyed by request id → response resolver. */
+  private audioPending = new Map<number, (data: unknown) => void>();
+  /** Last successful audio-list (api 1001) response, warmed on connect so the
+   *  player can render instantly on open instead of waiting for the robot. */
+  private audioListCache: unknown = null;
 
   // Status page
   private statusPage: StatusPage | null = null;
@@ -496,6 +508,10 @@ export class App {
     // BT icon and the separate input-source picker).
     this.navBar = new NavBar(this.controlUi, () => this.goToHub(), this.errorStore, {
       onMenuClick: () => this.openSettingsDrawer(),
+      onPttStart: () => this.onPttStart(),
+      onPttEnd: () => this.onPttEnd(),
+      onAudioMonitorStart: () => this.onAudioMonitorStart(),
+      onAudioMonitorStop: () => this.onAudioMonitorStop(),
     });
 
     // PIP camera. The PIP bubble swaps the 3D scene and the camera between
@@ -645,8 +661,6 @@ export class App {
     );
 
     this.probeSettingsState();
-    // Push current input-source state into the freshly-built page so
-    // the BT Remote section renders the right rows on entry.
     this.refreshInputSources();
   }
 
@@ -665,6 +679,14 @@ export class App {
       onRemoteIdSet: (id: string) => this.sendRemoteIdSet(id),
       onInternetRemoteToggle: (on: boolean) => this.sendInternetRemote(on),
       onInputSourceSelect: (id: string | null) => this.setActiveInputSource(id),
+      audio: {
+        publishRequest: (apiId: number, payload: string) => this.publishAudioRequest(apiId, payload),
+        getCachedList: () => this.audioListCache,
+        onRecordStart: () => this.onAudioPlayerRecordStart(),
+        onRecordStop: (onProgress: (pct: number) => void) => this.onAudioPlayerRecordStop(onProgress),
+        onUploadFile: (file: File, onProgress: (pct: number) => void) =>
+          this.handleAudioUpload(file, onProgress),
+      },
     };
   }
 
@@ -691,6 +713,7 @@ export class App {
     // toggles aren't stale, then probe the dog for fresh values.
     this.settingsDrawer.setState(this.settingsState);
     this.settingsDrawer.open();
+    this.settingsDrawer.refreshAudio();
     this.probeSettingsState();
   }
 
@@ -1114,6 +1137,7 @@ export class App {
     }, DATA_CHANNEL_TYPE.RTC_INNER_REQ);
 
     this.dataHandler.publishTyped('', 'on', DATA_CHANNEL_TYPE.VID);
+    this.dataHandler.publishTyped('', 'on', DATA_CHANNEL_TYPE.AUD);
 
     // Subscribe to data topics (matching APK's WebRTC bridge subscriptions).
     // Family-specific paths:
@@ -1126,6 +1150,9 @@ export class App {
     this.dataHandler.subscribe(RTC_TOPIC.MULTIPLE_STATE);
     this.dataHandler.subscribe(RTC_TOPIC.SELFTEST);
     this.dataHandler.subscribe(RTC_TOPIC.SERVICE_STATE);
+    // Audiohub playback-state push — keeps the audio player's play indicator
+    // in sync (track end, pause, loop-mode advance).
+    this.dataHandler.subscribe(RTC_TOPIC.AUDIOHUB_PLAY_STATE);
     if (cloudApi.connectFamily === 'G1') {
       this.dataHandler.subscribe(RTC_TOPIC.BMS_STATE);
       this.dataHandler.subscribe(RTC_TOPIC.SECONDARY_IMU);
@@ -1151,6 +1178,11 @@ export class App {
     this.runBashScript('get_whole_packet_version.sh');
     this.publishRequestLogged(RTC_TOPIC.MOTION_SWITCHER, 1001, undefined, { label: 'motion_switcher/get-mode' });
     this.publishRequestLogged(RTC_TOPIC.GAS_SENSOR, 1002, undefined, { label: 'gas_sensor/get-state' });
+
+    // Warm the audio-library cache so the player renders instantly when the
+    // user opens Controls (the robot's first 1001 response is slow). Delayed
+    // slightly so it doesn't compete with the initial state probes.
+    setTimeout(() => { void this.publishAudioRequest(1001, '{}'); }, 1500);
 
     // G1 has dedicated hardware + software version scripts
     // (BaseRunner.GET_HARDWARE_VERSION, GET_SOFTWARE_VERSION) per
@@ -1276,6 +1308,7 @@ export class App {
       // implemented, 7404 = FSM_UNAVAILABLE, 7403 = private endpoint.
       if (msg.topic) this.logResponse(msg.topic, msg.data);
 
+      if (msg.topic === 'rt/api/audiohub/response') { this.handleAudiohubResponse(msg.data); return; }
       if (msg.topic === 'rt/api/vui/response') { this.handleVuiResponse(msg.data); return; }
       if (msg.topic === 'rt/api/obstacles_avoid/response') { this.handleObstacleResponse(msg.data); return; }
       if (msg.topic === 'rt/api/rm_con/response') { this.handlePermissionNetResponse(msg.data); return; }
@@ -1294,6 +1327,9 @@ export class App {
     if (!msg.topic || !msg.data) return;
 
     switch (msg.topic) {
+      case RTC_TOPIC.AUDIOHUB_PLAY_STATE:
+        this.handleAudioPlayState(msg.data);
+        break;
       case RTC_TOPIC.LOW_STATE:
         this.handleLowState(msg.data);
         break;
@@ -1887,6 +1923,258 @@ export class App {
     );
   }
 
+  // ── Audio PTT ──
+
+  private async onPttStart(): Promise<void> {
+    if (this.pttActive || !this.dataHandler) return;
+    this.pttActive = true;
+
+    try {
+      this.audioRecorder = new AudioRecorder();
+      await this.audioRecorder.start();
+      this.publishRequestLogged(RTC_TOPIC.AUDIOHUB, 4001, '{}', { label: 'audiohub/enter-megaphone' });
+    } catch (err) {
+      log.ui.error('PTT audio start failed:', err);
+      this.pttActive = false;
+    }
+  }
+
+  private async onPttEnd(): Promise<void> {
+    if (!this.pttActive || !this.dataHandler) return;
+    this.pttActive = false;
+
+    try {
+      const wav = await this.audioRecorder?.stop();
+      this.audioRecorder?.destroy();
+      this.audioRecorder = null;
+
+      if (wav) {
+        await this.uploadAudioChunks(wav);
+      }
+      this.publishRequestLogged(RTC_TOPIC.AUDIOHUB, 4002, '{}', { label: 'audiohub/exit-megaphone' });
+    } catch (err) {
+      log.ui.error('PTT end error:', err);
+    }
+  }
+
+  private onAudioMonitorStart(): void {
+    this.audioMonitorActive = true;
+    if (this.audioEl) {
+      this.audioEl.play().catch(() => {});
+    }
+  }
+
+  private onAudioMonitorStop(): void {
+    this.audioMonitorActive = false;
+    if (this.audioEl) {
+      this.audioEl.pause();
+    }
+  }
+
+  /** Send an audiohub request and resolve with the robot's response payload
+   *  (the parsed `data` field). Correlates request→response by request id;
+   *  times out after 5 s so callers never hang. */
+  private publishAudioRequest(apiId: number, payload: string): Promise<unknown> {
+    return new Promise((resolve) => {
+      if (!this.dataHandler) {
+        resolve(null);
+        return;
+      }
+      const reqId = this.publishRequestLogged(RTC_TOPIC.AUDIOHUB, apiId, payload, {
+        label: `audiohub/api-${apiId}`,
+      });
+      if (reqId === undefined) {
+        resolve(null);
+        return;
+      }
+      const timer = window.setTimeout(() => {
+        this.audioPending.delete(reqId);
+        resolve(null);
+      }, 10000);
+      this.audioPending.set(reqId, (data) => {
+        clearTimeout(timer);
+        // Cache list responses so the player can render them instantly.
+        if (apiId === 1001 && data != null) this.audioListCache = data;
+        resolve(data);
+      });
+    });
+  }
+
+  /** Apply an audiohub play-state push (rt/audiohub/player/state) to the
+   *  audio player(s) so the playing indicator tracks the robot. The payload
+   *  may arrive as a JSON string or a parsed object. */
+  private handleAudioPlayState(data: unknown): void {
+    let state: { is_playing?: boolean; current_audio_unique_id?: string | null } | null = null;
+    try {
+      let d: any = data;
+      if (typeof d === 'string') d = JSON.parse(d);
+      // Some transports wrap the payload under `.data`.
+      if (d && typeof d === 'object' && d.data !== undefined && d.is_playing === undefined) {
+        d = typeof d.data === 'string' ? JSON.parse(d.data) : d.data;
+      }
+      if (d && typeof d === 'object') state = d;
+    } catch {
+      return;
+    }
+    if (!state) return;
+    this.settingsPage?.setAudioPlayState(state);
+    this.settingsDrawer?.setAudioPlayState(state);
+  }
+
+  /** Route an audiohub response back to the awaiting publishAudioRequest. */
+  private handleAudiohubResponse(data: unknown): void {
+    const d = data as { header?: { identity?: { id?: number } }; data?: unknown };
+    const id = d?.header?.identity?.id;
+    if (id === undefined) return;
+    const resolver = this.audioPending.get(id);
+    if (resolver) {
+      this.audioPending.delete(id);
+      resolver(d?.data);
+    }
+  }
+
+  private async handleAudioUpload(file: File, onProgress?: (pct: number) => void): Promise<void> {
+    if (!this.dataHandler) return;
+
+    try {
+      // The robot's audiohub only accepts WAV, so decode-and-re-encode any
+      // picked file (MP3/OGG/M4A/WAV) to 16-bit PCM WAV before uploading.
+      const wav = await convertFileToWav(file);
+      const bytes = new Uint8Array(wav);
+
+      // Enforce the robot's 10 MB ceiling (post-conversion). At 16 kHz mono
+      // that's ~5 minutes of audio.
+      const MAX_BYTES = 10 * 1024 * 1024;
+      if (bytes.length > MAX_BYTES) {
+        const mb = (bytes.length / 1024 / 1024).toFixed(1);
+        const mins = Math.floor((MAX_BYTES - 44) / (16000 * 2) / 60);
+        alert(
+          `Converted audio is ${mb} MB — over the robot's 10 MB limit.\n` +
+          `Please pick a clip under ~${mins} minutes.`,
+        );
+        throw new Error('audio exceeds 10MB after conversion');
+      }
+
+      const filename = file.name.replace(/\.[^/.]+$/, '');
+      await this.uploadWavToLibrary(wav, filename, onProgress);
+    } catch (err) {
+      log.ui.error('Audio upload failed:', err);
+      throw err;
+    }
+  }
+
+  /** Save a WAV buffer to the robot's audio library via api 2001 (chunked,
+   *  base64, 60 KB blocks). Used by both file upload and the player's record
+   *  button — both persist a named entry that shows up in the list (unlike the
+   *  megaphone PTT path, which only broadcasts live and saves nothing). */
+  private async uploadWavToLibrary(
+    wav: ArrayBuffer,
+    filename: string,
+    onProgress?: (pct: number) => void,
+  ): Promise<void> {
+    const bytes = new Uint8Array(wav);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    const base64Data = btoa(binary);
+
+    const createTime = Math.floor(Date.now() / 1000);
+    const chunkSize = 61440;
+    const chunks: string[] = [];
+    for (let i = 0; i < base64Data.length; i += chunkSize) {
+      chunks.push(base64Data.substring(i, i + chunkSize));
+    }
+
+    for (let i = 0; i < chunks.length; i++) {
+      const payload = {
+        current_block_index: i + 1,
+        total_block_number: chunks.length,
+        current_block_size: chunks[i].length,
+        block_content: chunks[i],
+        file_name: filename,
+        file_type: 'wav',
+        create_time: createTime,
+        file_size: bytes.length,
+      };
+      await this.publishAudioRequest(2001, JSON.stringify(payload));
+      onProgress?.(Math.round(((i + 1) / chunks.length) * 100));
+    }
+  }
+
+  // ── Audio player record (saves to library, unlike the megaphone PTT) ──
+
+  private async onAudioPlayerRecordStart(): Promise<void> {
+    if (this.audioRecorder) return;
+    try {
+      this.audioRecorder = new AudioRecorder();
+      await this.audioRecorder.start();
+    } catch (err) {
+      log.ui.error('Audio record start failed:', err);
+      this.audioRecorder?.destroy();
+      this.audioRecorder = null;
+      throw err;
+    }
+  }
+
+  private async onAudioPlayerRecordStop(onProgress?: (pct: number) => void): Promise<void> {
+    const recorder = this.audioRecorder;
+    this.audioRecorder = null;
+    if (!recorder) return;
+    try {
+      const wav = await recorder.stop();
+      recorder.destroy();
+      if (!wav) return; // too short / cancelled
+      // Auto-name with the local time; user can rename via the kebab menu.
+      const d = new Date();
+      const pad = (n: number) => n.toString().padStart(2, '0');
+      const name = `Rec ${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+      await this.uploadWavToLibrary(wav, name, onProgress);
+    } catch (err) {
+      log.ui.error('Audio record save failed:', err);
+      recorder.destroy();
+      throw err;
+    }
+  }
+
+  private async uploadAudioChunks(wav: ArrayBuffer): Promise<void> {
+    if (!this.dataHandler) return;
+
+    const base64 = Array.from(new Uint8Array(wav))
+      .map(b => String.fromCharCode(b))
+      .join('');
+    const b64Str = btoa(base64);
+    const chunkSize = 61440;
+    const chunks = [];
+
+    for (let i = 0; i < b64Str.length; i += chunkSize) {
+      chunks.push(b64Str.substring(i, i + chunkSize));
+    }
+
+    for (let i = 0; i < chunks.length; i++) {
+      const payload = {
+        current_block_index: i + 1,
+        total_block_number: chunks.length,
+        current_block_size: chunks[i].length,
+        block_content: chunks[i],
+      };
+      await this.publishRequestAsync(RTC_TOPIC.AUDIOHUB, 4003, JSON.stringify(payload));
+    }
+
+    // Calculate playback duration: (wav_size - 44_header_bytes) / (16000_hz * 2_bytes_per_sample)
+    const playbackDuration = (wav.byteLength - 44) / (16000 * 2);
+    // Wait for audio to finish playing before exiting megaphone mode
+    // Add 500ms buffer for safety
+    const delayMs = Math.ceil(playbackDuration * 1000) + 500;
+    await new Promise(resolve => setTimeout(resolve, delayMs));
+  }
+
+  private publishRequestAsync(topic: string, apiId: number, parameter?: string): Promise<void> {
+    return new Promise((resolve) => {
+      this.publishRequestLogged(topic, apiId, parameter, { label: `audiohub/upload-chunk` });
+      // Small delay between chunks to avoid overwhelming the channel
+      setTimeout(resolve, 50);
+    });
+  }
+
   // ── Connection ──
 
   private async connect(config: ConnectionConfig): Promise<void> {
@@ -1922,7 +2210,14 @@ export class App {
           this.stopBgNoise();
         }
       },
-      onAudioTrack: () => {},
+      onAudioTrack: (stream: MediaStream) => {
+        if (!this.audioEl) {
+          this.audioEl = document.createElement('audio');
+          this.audioEl.style.cssText = 'position:absolute;width:0;height:0;opacity:0;';
+          document.body.appendChild(this.audioEl);
+        }
+        this.audioEl.srcObject = stream;
+      },
     };
 
     const onStep = (msg: string) => this.connectionPanel?.setStatus(msg, 'info');
@@ -2154,6 +2449,15 @@ export class App {
     this.actionBar = null;
     this.settingsDrawer?.destroy();
     this.settingsDrawer = null;
+    this.audioEl?.pause();
+    this.audioEl?.remove();
+    this.audioEl = null;
+    this.pttActive = false;
+    this.audioMonitorActive = false;
+    this.audioRecorder?.destroy();
+    this.audioRecorder = null;
+    this.audioListCache = null;
+    this.audioPending.clear();
     this.clearEstopToast();
     this.emergencyStopped = false;
     this.statusPage = null;

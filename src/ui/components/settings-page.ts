@@ -1,5 +1,6 @@
 import type { RobotFamily } from '../../api/unitree-cloud';
 import type { InputSource, InputSourceKind } from './side-buttons';
+import { AudioPlayer, type AudioPlayerCallbacks } from './audio-player';
 
 export interface SettingsState {
   radarOn: boolean;
@@ -33,6 +34,9 @@ export interface SettingsCallbacks {
   /** Switch the active BLE/gamepad relay. Pass null to deactivate
    *  (falls back to the on-screen joysticks). */
   onInputSourceSelect?: (id: string | null) => void;
+  /** When provided, an APK-style Audio Player section is rendered (audiohub
+   *  record / upload / list / play / loop / rename / delete). */
+  audio?: AudioPlayerCallbacks;
   family?: RobotFamily;
 }
 
@@ -74,6 +78,7 @@ export class SettingsPage {
    *  is flipped back on so the same remote keeps driving (until it
    *  disconnects or the user picks something else). */
   private btRemoteLastActiveId: string | null = null;
+  private audioPlayer: AudioPlayer | null = null;
 
   constructor(
     parent: HTMLElement,
@@ -193,8 +198,32 @@ export class SettingsPage {
     }
     this.appendIfPopulated(content, other);
 
+    // ── Audio Player ── APK-style audiohub recorder / library.
+    if (callbacks.audio) {
+      const audioCat = this.buildCategory('Audio Player');
+      this.audioPlayer = new AudioPlayer(callbacks.audio);
+      audioCat.appendChild(this.audioPlayer.element);
+      this.appendIfPopulated(content, audioCat);
+    }
+
     this.container.appendChild(content);
     parent.appendChild(this.container);
+  }
+
+  /** Refresh the audio library list (e.g. after an external PTT recording). */
+  refreshAudio(): void {
+    this.audioPlayer?.refresh();
+  }
+
+  /** Push a robot play-state update into the audio player. */
+  setAudioPlayState(state: { is_playing?: boolean; current_audio_unique_id?: string | null }): void {
+    this.audioPlayer?.setPlayState(state);
+  }
+
+  /** Tear down owned child components. */
+  destroy(): void {
+    this.audioPlayer?.destroy();
+    this.audioPlayer = null;
   }
 
   /** Create a category container with a title header. The container

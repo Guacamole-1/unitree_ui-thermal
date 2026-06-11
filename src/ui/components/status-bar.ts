@@ -2,6 +2,8 @@ import { theme } from '../theme';
 import { cloudApi } from '../../api/unitree-cloud';
 import type { ErrorStore } from '../../protocol/error-store';
 import { ErrorsBadge } from './errors-badge';
+import { AudioPtt } from './audio-ptt';
+import { AudioMonitor } from './audio-monitor';
 
 const SUN_SVG = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#FFB74D" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
   <circle cx="12" cy="12" r="4"/>
@@ -38,6 +40,10 @@ export interface NavBarOptions {
    *  rendered as the rightmost item in the navbar (control view: opens
    *  the settings drawer). When absent, the icon is hidden. */
   onMenuClick?: () => void;
+  onPttStart?: () => void;
+  onPttEnd?: () => void;
+  onAudioMonitorStart?: () => void;
+  onAudioMonitorStop?: () => void;
 }
 
 export class NavBar {
@@ -52,6 +58,8 @@ export class NavBar {
   private wifiIconEl!: HTMLImageElement;
   private themeIconWrap!: HTMLElement;
   private menuIconWrap: HTMLButtonElement | null = null;
+  private audioPtt: AudioPtt | null = null;
+  private audioMonitor: AudioMonitor | null = null;
   private unsubTheme: () => void = () => {};
   private onBack: () => void;
   private errorsBadge: ErrorsBadge | null = null;
@@ -110,11 +118,25 @@ export class NavBar {
       </div>
     `;
 
-    // Append the settings icon at the end of the right cluster — its
-    // drawer hosts BT-remote/gamepad selection and the rest of the
-    // robot settings, replacing the old passive BT icon and the
-    // separate input-source picker.
+    // Append the audio monitor, PTT button, and settings icon at the end of the right cluster.
     const rightSlot = this.container.querySelector('.nav-bar-right')!;
+
+    if (this.options.onAudioMonitorStart && this.options.onAudioMonitorStop) {
+      this.audioMonitor = new AudioMonitor({
+        onStart: () => this.options.onAudioMonitorStart?.(),
+        onStop: () => this.options.onAudioMonitorStop?.(),
+      });
+      rightSlot.appendChild(this.audioMonitor.element);
+    }
+
+    if (this.options.onPttStart && this.options.onPttEnd) {
+      this.audioPtt = new AudioPtt({
+        onPttStart: () => this.options.onPttStart?.(),
+        onPttEnd: () => this.options.onPttEnd?.(),
+      });
+      rightSlot.appendChild(this.audioPtt.element);
+    }
+
     if (this.options.onMenuClick) {
       this.menuIconWrap = document.createElement('button');
       this.menuIconWrap.type = 'button';
@@ -159,7 +181,12 @@ export class NavBar {
     this.unsubTheme();
     this.errorsBadge?.destroy();
     this.errorsBadge = null;
+    this.audioMonitor?.destroy();
+    this.audioMonitor = null;
+    this.audioPtt?.destroy();
+    this.audioPtt = null;
   }
+
 
   setBattery(percent: number): void {
     const p = Math.round(percent);
