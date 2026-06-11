@@ -87,6 +87,26 @@ export const RTC_TOPIC = {
   USLAM_GRID_MAP: 'rt/mapping/grid_map',
 } as const;
 
+// G1 Demo Teaching (api_ids on the `arm` service → RTC_TOPIC.G1_ARM_REQUEST).
+// Recording/playback state is pushed on RTC_TOPIC.G1_ARM_ACTION_STATE
+// (rt/arm/action/state) as { id }. Verified against the decompiled APK
+// (com.unitree.g1_d.ui.teaching.*, DogApiId 7106-7113).
+//   state id — record ctx: -1 active, 0 saved | play ctx: 0 idle, 99 prep, 100 running
+export const G1_TEACH_API = {
+  UNITREE_ACTION: 7106, // built-in Unitree actions (unused here)
+  LIST: 7107,           // list recorded actions (no param) → [[presets],[recorded]]
+  PLAY: 7108,           // { action_name }
+  RENAME: 7109,         // { pre_name, new_name }
+  START: 7110,          // start { action_name } · heartbeat { action_name:"" } · stop (no param)
+  PAUSE: 7111,          // { pause: boolean }
+  DELETE: 7112,         // { action_name }
+  ARM_TEACH: 7113,      // stop playback / exit teach mode (no param)
+} as const;
+
+// Sport-service damp (emergency relax) used by the teaching player.
+// Topic RTC_TOPIC.SPORT_MOD, param { data: 1 }.
+export const G1_SPORT_DAMP = 7101;
+
 export const SPORT_CMD = {
   // Shared across Normal/AI/MCF (1xxx)
   Damp: 1001,

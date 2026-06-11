@@ -12,6 +12,7 @@ import { ServicesPage, type ServiceEntry } from './components/services-page';
 import { SettingsPage, type SettingsState } from './components/settings-page';
 import { GO2_AUDIO_API, G1_AUDIO_API } from './components/audio-player';
 import { MappingPage } from './components/mapping-page';
+import { TeachingPage, type TeachAction } from './components/teaching-page';
 import { AccountPage } from './components/account-page';
 import { BtStatusIcon, type BluetoothStatus } from './components/bt-status-icon';
 import { BtPage } from './components/bt-page';
@@ -26,7 +27,7 @@ import { connectLocal } from '../connection/local-connector';
 import { promptAesKey } from './components/aes-key-prompt';
 import { connectRemote, loginWithEmail } from '../connection/remote-connector';
 import { DataChannelHandler } from '../protocol/data-channel';
-import { RTC_TOPIC, SPORT_CMD, DATA_CHANNEL_TYPE } from '../protocol/topics';
+import { RTC_TOPIC, SPORT_CMD, DATA_CHANNEL_TYPE, G1_TEACH_API, G1_SPORT_DAMP } from '../protocol/topics';
 import { ErrorStore } from '../protocol/error-store';
 import { ErrorsBadge } from './components/errors-badge';
 import { ErrorToastHost } from './components/error-toast';
@@ -35,7 +36,7 @@ import { AudioRecorder, convertFileToWav } from './audio-recorder';
 import type { WebRTCConnection } from '../connection/webrtc';
 import type { Scene3D } from './scene/scene';
 
-type Screen = 'landing' | 'connection' | 'hub' | 'control' | 'status' | 'services' | 'settings' | 'app-settings' | 'mapping' | 'account' | 'bt' | 'errors';
+type Screen = 'landing' | 'connection' | 'hub' | 'control' | 'status' | 'services' | 'settings' | 'app-settings' | 'mapping' | 'account' | 'bt' | 'errors' | 'teaching';
 
 /** Translate raw connector errors into user-facing messages. The G1
  *  RockChip accepts a single WebRTC client at a time — 429 on con_ing
@@ -98,6 +99,13 @@ export class App {
   private audioMonitorActive = false;
   /** In-flight audiohub requests keyed by request id → response resolver. */
   private audioPending = new Map<number, (data: unknown) => void>();
+  /** In-flight arm (G1 teaching) requests keyed by request id → resolver.
+   *  Resolves with { code, data } so callers can branch on the status code. */
+  private armPending = new Map<number, (r: { code: number; data: unknown }) => void>();
+  private teachingPage: TeachingPage | null = null;
+  /** 1 Hz keepalive sent while recording a teaching action (api 7110,
+   *  action_name:"") — the robot stops recording if it goes silent. */
+  private teachHeartbeat = 0;
   /** Last successful audio-list (api 1001) response, warmed on connect so the
    *  player can render instantly on open instead of waiting for the robot. */
   private audioListCache: unknown = null;
@@ -477,6 +485,18 @@ export class App {
       if (!needsWebRTC) mapBtn.addEventListener('click', () => this.showMappingScreen());
       else mapBtn.disabled = true;
       btnRow.appendChild(mapBtn);
+    }
+
+    // Demo Teaching — G1 only. Record arm/body trajectories on the robot and
+    // play them back (native Explorer feature; Go2 has no equivalent). Ported
+    // from com.unitree.g1_d.ui.teaching.* over the arm service (api 7106-7113).
+    if (cloudApi.connectFamily === 'G1') {
+      const teachBtn = document.createElement('button');
+      teachBtn.className = `hub-btn ${needsWebRTC ? 'hub-btn-disabled' : 'hub-btn-secondary'}`;
+      teachBtn.innerHTML = `<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 10 12 5 2 10l10 5 10-5z"/><path d="M6 12v5c0 1.2 2.7 3 6 3s6-1.8 6-3v-5"/><line x1="22" y1="10" x2="22" y2="15"/></svg><span>Demo Teaching</span>`;
+      if (!needsWebRTC) teachBtn.addEventListener('click', () => this.showTeachingScreen());
+      else teachBtn.disabled = true;
+      btnRow.appendChild(teachBtn);
     }
 
     // Account Manager lives on the landing page now — no need to surface it
@@ -866,6 +886,9 @@ export class App {
     this.emergencyStopped = false;
     this.scene3d?.destroy();
     this.scene3d = null;
+    this.stopTeachHeartbeat();
+    this.teachingPage?.destroy();
+    this.teachingPage = null;
     this.statusPage = null;
     this.servicesPage = null;
     this.settingsPage = null;
@@ -1359,11 +1382,11 @@ export class App {
       if (msg.topic === 'rt/api/motion_switcher/response') { this.handleMotionSwitcherResponse(msg.data); return; }
       if (msg.topic === 'rt/api/robot_state/response') { this.handleRobotStateResponse(msg.data); return; }
       if (msg.topic === 'rt/api/robot_type_service/response') { this.handleRobotTypeResponse(msg.data); return; }
-      // sport/arm/loco responses have no further handling — logResponse
+      if (msg.topic === 'rt/api/arm/response') { this.handleArmResponse(msg.data); return; }
+      // sport/loco responses have no further handling — logResponse
       // above is the entire story for these topics.
       if (
         msg.topic === 'rt/api/sport/response' ||
-        msg.topic === 'rt/api/arm/response' ||
         msg.topic === 'rt/api/loco/response'
       ) return;
     }
@@ -1390,6 +1413,9 @@ export class App {
         break;
       case RTC_TOPIC.MAIN_BOARD_STATE:
         this.handleMainBoardState(msg.data);
+        break;
+      case RTC_TOPIC.G1_ARM_ACTION_STATE:
+        this.handleArmActionState(msg.data);
         break;
       case RTC_TOPIC.ROBOT_ODOM:
         this.handleRobotOdom(msg.data);
@@ -2175,6 +2201,122 @@ export class App {
     }
   }
 
+  // ── G1 Demo Teaching ──────────────────────────────────────────────────────
+
+  /** Send an arm-service request and await its response. Resolves with the
+   *  robot status code (0 = ok; 7404 = FSM unavailable) plus the data payload. */
+  private publishArmRequest(apiId: number, payload: string = ''): Promise<{ code: number; data: unknown }> {
+    return new Promise((resolve) => {
+      // Default to an EMPTY-STRING parameter (not '{}') — the official frontend
+      // sends parameter:"" for no-param requests, and the teaching stop (7110
+      // with no param) only finalizes when the parameter is empty. Sending
+      // '{}' is read as a heartbeat and recording never stops.
+      const reqId = this.publishRequestLogged(RTC_TOPIC.G1_ARM_REQUEST, apiId, payload, {
+        label: `teaching/api-${apiId}`,
+      });
+      if (reqId === undefined) { resolve({ code: -1, data: null }); return; }
+      const timer = window.setTimeout(() => {
+        this.armPending.delete(reqId);
+        resolve({ code: -1, data: null });
+      }, 10000);
+      this.armPending.set(reqId, (r) => { clearTimeout(timer); resolve(r); });
+    });
+  }
+
+  /** Route an arm/response back to the awaiting publishArmRequest. */
+  private handleArmResponse(data: unknown): void {
+    const d = data as { header?: { identity?: { id?: number }; status?: { code?: number } }; data?: unknown };
+    const id = d?.header?.identity?.id;
+    if (id === undefined) return;
+    const resolver = this.armPending.get(id);
+    if (resolver) {
+      this.armPending.delete(id);
+      resolver({ code: d?.header?.status?.code ?? 0, data: d?.data });
+    }
+  }
+
+  /** rt/arm/action/state { id } — drives the teaching create/play state
+   *  machine (record: -1 active / 0 saved; play: 0 idle / 99 prep / 100 run). */
+  private handleArmActionState(data: unknown): void {
+    // The robot streams this ~10×/s; only forward it while the teaching page
+    // is open (record: id -1 active / 0 saved; play: 0 idle / 99 prep / 100 run).
+    if (!this.teachingPage) return;
+    let id: number | undefined;
+    try {
+      let v: any = data;
+      if (typeof v === 'string') v = JSON.parse(v);
+      // Some transports wrap the payload under `.data` (std_msgs/String).
+      if (v && typeof v === 'object' && v.id === undefined && v.data !== undefined) {
+        v = typeof v.data === 'string' ? JSON.parse(v.data) : v.data;
+      }
+      if (v && typeof v === 'object' && typeof v.id === 'number') id = v.id;
+    } catch { return; }
+    if (id !== undefined) this.teachingPage.setActionState(id);
+  }
+
+  /** Parse the teaching list response (api 7107). The robot returns
+   *  [[presets],[recorded]] — the app shows index [1]. Accepts a JSON string
+   *  or an already-parsed value. */
+  private parseTeachList(data: unknown): TeachAction[] {
+    let v: any = data;
+    try { if (typeof v === 'string') v = JSON.parse(v); } catch { return []; }
+    const recorded = Array.isArray(v) ? (v.length > 1 ? v[1] : v[0]) : null;
+    if (!Array.isArray(recorded)) return [];
+    return recorded
+      .filter((a) => a && typeof a.name === 'string')
+      .map((a) => ({ name: a.name, id: Number(a.id ?? 0), time: Number(a.time ?? 0) }));
+  }
+
+  private startTeachHeartbeat(): void {
+    this.stopTeachHeartbeat();
+    const beat = JSON.stringify({ action_name: '' });
+    this.teachHeartbeat = window.setInterval(() => {
+      // Keepalive (1 Hz) — sent silently via the raw channel so it doesn't
+      // flood the request log during a recording.
+      this.dataHandler?.publishRequest(RTC_TOPIC.G1_ARM_REQUEST, G1_TEACH_API.START, beat);
+    }, 1000);
+  }
+
+  private stopTeachHeartbeat(): void {
+    if (this.teachHeartbeat) { clearInterval(this.teachHeartbeat); this.teachHeartbeat = 0; }
+  }
+
+  private showTeachingScreen(): void {
+    this.currentScreen = 'teaching';
+    this.root.innerHTML = '';
+    this.root.className = 'app-root teaching-screen';
+    this.btStatusIcon?.setVisible(true); this.themeToggle?.setVisible(true);
+    this.accountStatusIcon?.setVisible(true);
+    this.errorsBadgeFloating?.setVisible(true);
+
+    this.teachingPage = new TeachingPage(this.root, () => this.goToHub(), {
+      getList: async () => {
+        const r = await this.publishArmRequest(G1_TEACH_API.LIST, '');
+        return this.parseTeachList(r.data);
+      },
+      play: async (name) => (await this.publishArmRequest(G1_TEACH_API.PLAY, JSON.stringify({ action_name: name }))).code,
+      stopPlay: () => { void this.publishArmRequest(G1_TEACH_API.ARM_TEACH); },
+      damp: () => { this.publishRequestLogged(RTC_TOPIC.SPORT_MOD, G1_SPORT_DAMP, JSON.stringify({ data: 1 }), { label: 'teaching/damp' }); },
+      rename: async (oldName, newName) =>
+        (await this.publishArmRequest(G1_TEACH_API.RENAME, JSON.stringify({ pre_name: oldName, new_name: newName }))).code,
+      remove: async (name) => (await this.publishArmRequest(G1_TEACH_API.DELETE, JSON.stringify({ action_name: name }))).code,
+      startRecord: async (name) => {
+        const r = await this.publishArmRequest(G1_TEACH_API.START, JSON.stringify({ action_name: name }));
+        if (r.code === 0) this.startTeachHeartbeat();
+        return r.code;
+      },
+      stopRecord: async () => {
+        this.stopTeachHeartbeat();
+        return (await this.publishArmRequest(G1_TEACH_API.START)).code; // no param = finalize
+      },
+      pauseRecord: (pause) => { void this.publishArmRequest(G1_TEACH_API.PAUSE, JSON.stringify({ pause })); },
+      deleteRecord: (name) => {
+        this.stopTeachHeartbeat();
+        void this.publishArmRequest(G1_TEACH_API.DELETE, JSON.stringify({ action_name: name }));
+      },
+    });
+  }
+
   private async handleAudioUpload(file: File, onProgress?: (pct: number) => void): Promise<void> {
     if (!this.dataHandler) return;
 
@@ -2632,6 +2774,10 @@ export class App {
     this.audioRecorder = null;
     this.audioListCache = null;
     this.audioPending.clear();
+    this.armPending.clear();
+    this.stopTeachHeartbeat();
+    this.teachingPage?.destroy();
+    this.teachingPage = null;
     this.clearEstopToast();
     this.emergencyStopped = false;
     this.statusPage = null;
