@@ -161,7 +161,12 @@ export async function connectLocal(
     }
 
     log.webrtc.info(`${tag()} Received answer SDP (${answerSdp.length} bytes)`);
-    log.webrtc.info(`${tag()} Answer SDP starts with: ${answerSdp.slice(0, 80)}...`);
+    // Concise media summary (which m-lines the robot negotiated + direction) —
+    // enough to spot a missing/odd audio or video line without dumping the SDP.
+    const mediaLines = answerSdp.split('\n')
+      .map(l => l.trim())
+      .filter(l => /^m=(audio|video)|^a=(sendrecv|sendonly|recvonly|inactive)$/.test(l));
+    log.webrtc.debug(`${tag()} media:`, mediaLines.join(' | ') || '(none)');
 
     onStep?.('Setting remote description...');
     await webrtc.setAnswer(answerSdp);

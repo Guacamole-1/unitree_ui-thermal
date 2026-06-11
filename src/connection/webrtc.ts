@@ -59,6 +59,12 @@ export class WebRTCConnection {
       if (event.track.kind === 'video') {
         this.callbacks.onVideoTrack(event.streams[0] ?? new MediaStream([event.track]));
       } else if (event.track.kind === 'audio') {
+        const t = event.track;
+        // muted=true with no later 'unmute' means the robot isn't actually
+        // sending audio media on this track (the usual cause of "no sound").
+        log.webrtc.info(`${rtcTag()} Audio track: muted=${t.muted} enabled=${t.enabled} readyState=${t.readyState}`);
+        t.onunmute = () => log.webrtc.info(`${rtcTag()} Audio track UNMUTED — media is flowing`);
+        t.onmute = () => log.webrtc.info(`${rtcTag()} Audio track muted — media stopped`);
         this.callbacks.onAudioTrack(event.streams[0] ?? new MediaStream([event.track]));
       }
     };

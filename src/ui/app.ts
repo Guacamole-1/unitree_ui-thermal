@@ -10,6 +10,7 @@ import { SettingsDrawer } from './components/settings-drawer';
 import { StatusPage } from './components/status-page';
 import { ServicesPage, type ServiceEntry } from './components/services-page';
 import { SettingsPage, type SettingsState } from './components/settings-page';
+import { GO2_AUDIO_API, G1_AUDIO_API } from './components/audio-player';
 import { MappingPage } from './components/mapping-page';
 import { AccountPage } from './components/account-page';
 import { BtStatusIcon, type BluetoothStatus } from './components/bt-status-icon';
@@ -506,12 +507,22 @@ export class App {
     // opens the in-control settings drawer, which is now the sole entry
     // point for BT-remote / gamepad selection (replaces the old passive
     // BT icon and the separate input-source picker).
+    // G1 has no WebRTC audio I/O: its firmware disables the megaphone api
+    // (PTT) and never streams the mic over the audio track (confirmed — the
+    // remote audio track stays muted=true, no media flows). So omit both the
+    // PTT and the audio-monitor buttons on G1. The Audio Player (audiohub
+    // library, over the data channel) still works on G1. Go2 keeps both.
+    const audioNavCallbacks = cloudApi.connectFamily === 'G1'
+      ? {}
+      : {
+          onPttStart: () => this.onPttStart(),
+          onPttEnd: () => this.onPttEnd(),
+          onAudioMonitorStart: () => this.onAudioMonitorStart(),
+          onAudioMonitorStop: () => this.onAudioMonitorStop(),
+        };
     this.navBar = new NavBar(this.controlUi, () => this.goToHub(), this.errorStore, {
       onMenuClick: () => this.openSettingsDrawer(),
-      onPttStart: () => this.onPttStart(),
-      onPttEnd: () => this.onPttEnd(),
-      onAudioMonitorStart: () => this.onAudioMonitorStart(),
-      onAudioMonitorStop: () => this.onAudioMonitorStop(),
+      ...audioNavCallbacks,
     });
 
     // PIP camera. The PIP bubble swaps the 3D scene and the camera between
@@ -682,6 +693,7 @@ export class App {
       onInternetRemoteToggle: (on: boolean) => this.sendInternetRemote(on),
       onInputSourceSelect: (id: string | null) => this.setActiveInputSource(id),
       audio: {
+        api: cloudApi.connectFamily === 'G1' ? G1_AUDIO_API : GO2_AUDIO_API,
         publishRequest: (apiId: number, payload: string) => this.publishAudioRequest(apiId, payload),
         getCachedList: () => this.audioListCache,
         onRecordStart: () => this.onAudioPlayerRecordStart(),
@@ -1152,9 +1164,11 @@ export class App {
     this.dataHandler.subscribe(RTC_TOPIC.MULTIPLE_STATE);
     this.dataHandler.subscribe(RTC_TOPIC.SELFTEST);
     this.dataHandler.subscribe(RTC_TOPIC.SERVICE_STATE);
-    // Audiohub playback-state push — keeps the audio player's play indicator
-    // in sync (track end, pause, loop-mode advance).
+    // Audiohub playback-state — keeps the audio player's play indicator in
+    // sync. Go2 pushes full state on rt/audiohub/player/state; G1 only emits
+    // a play_state signal on rt/audio_msg/filter. Subscribe to both.
     this.dataHandler.subscribe(RTC_TOPIC.AUDIOHUB_PLAY_STATE);
+    this.dataHandler.subscribe(RTC_TOPIC.AUDIO_MSG_FILTER);
     if (cloudApi.connectFamily === 'G1') {
       this.dataHandler.subscribe(RTC_TOPIC.BMS_STATE);
       this.dataHandler.subscribe(RTC_TOPIC.SECONDARY_IMU);
@@ -1331,6 +1345,9 @@ export class App {
     switch (msg.topic) {
       case RTC_TOPIC.AUDIOHUB_PLAY_STATE:
         this.handleAudioPlayState(msg.data);
+        break;
+      case RTC_TOPIC.AUDIO_MSG_FILTER:
+        this.handleAudioMsgFilter(msg.data);
         break;
       case RTC_TOPIC.LOW_STATE:
         this.handleLowState(msg.data);
@@ -2021,6 +2038,28 @@ export class App {
     if (!state) return;
     this.settingsPage?.setAudioPlayState(state);
     this.settingsDrawer?.setAudioPlayState(state);
+  }
+
+  /** G1 play-state signal (rt/audio_msg/filter). The payload is a std_msgs
+   *  String whose JSON carries `play_state`; play_state === 0 means playback
+   *  stopped, so we clear the player's playing indicator. (G1 never publishes
+   *  the Go2-style rt/audiohub/player/state topic.) */
+  private handleAudioMsgFilter(data: unknown): void {
+    try {
+      let d: any = data;
+      // std_msgs/String wrapper: { data: "<json>" }
+      if (d && typeof d === 'object' && typeof d.data === 'string' && d.play_state === undefined) {
+        d = d.data;
+      }
+      if (typeof d === 'string') d = JSON.parse(d);
+      if (!d || typeof d !== 'object' || !('play_state' in d)) return;
+      if (Number(d.play_state) === 0) {
+        this.settingsPage?.setAudioPlayState({ is_playing: false });
+        this.settingsDrawer?.setAudioPlayState({ is_playing: false });
+      }
+    } catch {
+      /* ignore malformed audio_msg */
+    }
   }
 
   /** Route an audiohub response back to the awaiting publishAudioRequest. */

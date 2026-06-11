@@ -11,7 +11,29 @@ import { log } from '../logger';
 
 export type LoopMode = 'single_cycle' | 'list_loop' | 'no_cycle';
 
+/** Per-family audiohub API map. Go2 and G1 differ substantially: G1 has no
+ *  pause/resume (only a single stop), no loop mode, and uses different ids for
+ *  rename/delete. See the firmware audio_player service for each family. */
+export interface AudioApi {
+  list: number;          // get audio list (1001 both)
+  play: number;          // start playing a track (1002 both)
+  stop: number;          // stop/pause playback (Go2 pause 1003 / G1 stop 1005)
+  rename: number;        // rename a track (Go2 1008 / G1 1003)
+  del: number;           // delete a track (Go2 1009 / G1 1004)
+  loopSet: number | null;  // set play mode (Go2 1007 / G1 unsupported)
+  loopGet: number | null;  // get play mode (Go2 1010 / G1 unsupported)
+}
+
+export const GO2_AUDIO_API: AudioApi = {
+  list: 1001, play: 1002, stop: 1003, rename: 1008, del: 1009, loopSet: 1007, loopGet: 1010,
+};
+export const G1_AUDIO_API: AudioApi = {
+  list: 1001, play: 1002, stop: 1005, rename: 1003, del: 1004, loopSet: null, loopGet: null,
+};
+
 export interface AudioPlayerCallbacks {
+  /** Per-family audiohub API id map. Defaults to the Go2 map if omitted. */
+  api?: AudioApi;
   /** Publish an audiohub request and resolve with the parsed response. */
   publishRequest: (apiId: number, payload: string) => Promise<unknown>;
   /** Synchronously return the last cached audio-list response (api 1001), if
@@ -68,6 +90,7 @@ function setMask(el: HTMLElement, src: string): void {
 export class AudioPlayer {
   element: HTMLElement;
   private cb: AudioPlayerCallbacks;
+  private api: AudioApi;
   private files: AudioFile[] = [];
   private playingId: string | null = null;
   private loopMode: LoopMode = 'list_loop';
@@ -86,6 +109,7 @@ export class AudioPlayer {
 
   constructor(cb: AudioPlayerCallbacks) {
     this.cb = cb;
+    this.api = cb.api ?? GO2_AUDIO_API;
     injectStyles();
     this.element = document.createElement('div');
     this.element.className = 'aud-player';
@@ -159,7 +183,13 @@ export class AudioPlayer {
     this.loopIcon.style.cssText = maskStyle(LOOP_ICON[this.loopMode], 24, 22, '#303133');
     this.loopBtn.appendChild(this.loopIcon);
     this.loopBtn.addEventListener('click', () => this.cycleLoopMode());
-    controls.appendChild(this.loopBtn);
+    // Loop mode is Go2-only; G1's audio_hub has no play-mode api. When hidden,
+    // right-align the upload button so the row stays balanced.
+    if (this.api.loopSet != null) {
+      controls.appendChild(this.loopBtn);
+    } else {
+      uploadBtn.style.marginLeft = 'auto';
+    }
 
     this.element.appendChild(controls);
 
@@ -187,7 +217,7 @@ export class AudioPlayer {
     }
     this.loading = true;
     try {
-      const resp = await this.cb.publishRequest(1001, '{}');
+      const resp = await this.cb.publishRequest(this.api.list, '{}');
       // A null response means the request failed or timed out. Do NOT clobber
       // an already-populated list with an empty one in that case — keep what
       // we have and try again later. (This was the "appear then disappear"
@@ -212,8 +242,9 @@ export class AudioPlayer {
   }
 
   private async loadLoopMode(): Promise<void> {
+    if (this.api.loopGet == null) return; // family has no loop mode (G1)
     try {
-      const resp = await this.cb.publishRequest(1010, '{}');
+      const resp = await this.cb.publishRequest(this.api.loopGet, '{}');
       const mode = parsePlayMode(resp);
       if (mode) {
         this.loopMode = mode;
@@ -394,13 +425,14 @@ export class AudioPlayer {
   private async togglePlay(f: AudioFile): Promise<void> {
     const isThisPlaying = this.playingId === f.UNIQUE_ID && this.playingState;
     if (isThisPlaying) {
-      // pause
+      // Stop/pause. Go2 pauses (1003); G1 has only a single stop (1005) that
+      // takes no parameter (the extra unique_id is ignored).
       this.playingState = false;
-      await this.safe(() => this.cb.publishRequest(1003, JSON.stringify({ unique_id: f.UNIQUE_ID })));
+      await this.safe(() => this.cb.publishRequest(this.api.stop, JSON.stringify({ unique_id: f.UNIQUE_ID })));
     } else {
       this.playingId = f.UNIQUE_ID;
       this.playingState = true;
-      await this.safe(() => this.cb.publishRequest(1002, JSON.stringify({ unique_id: f.UNIQUE_ID })));
+      await this.safe(() => this.cb.publishRequest(this.api.play, JSON.stringify({ unique_id: f.UNIQUE_ID })));
     }
     this.renderList();
   }
@@ -408,10 +440,11 @@ export class AudioPlayer {
   // ── Loop mode ──
 
   private cycleLoopMode(): void {
+    if (this.api.loopSet == null) return;
     const idx = LOOP_ORDER.indexOf(this.loopMode);
     this.loopMode = LOOP_ORDER[(idx + 1) % LOOP_ORDER.length];
     this.updateLoopIcon();
-    void this.safe(() => this.cb.publishRequest(1007, JSON.stringify({ play_mode: this.loopMode })));
+    void this.safe(() => this.cb.publishRequest(this.api.loopSet!, JSON.stringify({ play_mode: this.loopMode })));
   }
 
   private updateLoopIcon(): void {
@@ -550,7 +583,7 @@ export class AudioPlayer {
       }
       close();
       await this.safe(() =>
-        this.cb.publishRequest(1008, JSON.stringify({ unique_id: f.UNIQUE_ID, new_name: newName })),
+        this.cb.publishRequest(this.api.rename, JSON.stringify({ unique_id: f.UNIQUE_ID, new_name: newName })),
       );
       window.setTimeout(() => void this.loadList(), 400);
     });
@@ -568,7 +601,7 @@ export class AudioPlayer {
       this.playingId = null;
       this.playingState = false;
     }
-    await this.safe(() => this.cb.publishRequest(1009, JSON.stringify({ unique_id: f.UNIQUE_ID })));
+    await this.safe(() => this.cb.publishRequest(this.api.del, JSON.stringify({ unique_id: f.UNIQUE_ID })));
     window.setTimeout(() => void this.loadList(), 400);
   }
 

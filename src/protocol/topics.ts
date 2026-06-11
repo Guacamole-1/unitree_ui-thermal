@@ -11,10 +11,15 @@ export const RTC_TOPIC = {
   CONFIG: 'rt/api/config/request',
   VIDEOHUB: 'rt/api/videohub/request',
   AUDIOHUB: 'rt/api/audiohub/request',
-  // Audiohub playback-state push. Subscribe to receive JSON
+  // Audiohub playback-state push (Go2). Subscribe to receive JSON
   // { is_playing, current_audio_unique_id, current_audio_custom_name }
   // whenever a track starts/stops/advances (incl. loop-mode transitions).
   AUDIOHUB_PLAY_STATE: 'rt/audiohub/player/state',
+  // G1 playback signal. The G1 audio_hub never publishes the player/state
+  // topic above; instead the lower-level voice player emits rt/audio_msg,
+  // filtered here. Payload is a JSON String with a `play_state` field —
+  // play_state === 0 means playback stopped/ended.
+  AUDIO_MSG_FILTER: 'rt/audio_msg/filter',
   FOURG_AGENT: 'rt/api/fourg_agent/request',
   // Internet remote-connection permission. Get: api_id=1001, no params.
   // Set: api_id=1002, params { enable_status: 2 (enabled) | 1 (disabled) }.
