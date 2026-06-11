@@ -673,6 +673,8 @@ export class App {
       onRadarToggle: (enabled: boolean) => this.sendRadarToggle(enabled),
       onLidarToggle: (enabled: boolean) => this.sendLidarToggle(enabled),
       onLampSet: (level: number) => this.sendLamp(level),
+      onLedSet: (color: string, blink: boolean) => this.sendLed(color, blink),
+      onLedOff: () => this.sendLedOff(),
       onVolumeSet: (level: number) => this.sendVolume(level),
       onWaistLockToggle: (lock: boolean) => this.sendWaistLock(lock),
       onRemoteSwitchToggle: (on: boolean) => this.sendRemoteSwitch(on),
@@ -2390,6 +2392,28 @@ export class App {
       RTC_TOPIC.VUI, 1005,
       JSON.stringify({ brightness: level }),
       { label: `vui/set-brightness ${level}` },
+    );
+  }
+
+  /** Set the RGB status LED to a named colour (vui api_id 1007). `time` is the
+   *  on-duration in seconds (999 ≈ persistent, matching the app); `flash_cycle`
+   *  is the blink period in milliseconds (the SDK example uses 500). Colours:
+   *  white/red/yellow/blue/green/cyan/purple. */
+  private sendLed(color: string, blink: boolean): void {
+    const param: Record<string, unknown> = { color, time: 999 };
+    if (blink) param.flash_cycle = 500;
+    this.publishRequestLogged(
+      RTC_TOPIC.VUI, 1007,
+      JSON.stringify(param),
+      { label: `vui/led-set ${color}${blink ? ' blink' : ''}` },
+    );
+  }
+
+  /** Turn the RGB status LED off (vui api_id 1008). */
+  private sendLedOff(): void {
+    this.publishRequestLogged(
+      RTC_TOPIC.VUI, 1008, '{}',
+      { label: 'vui/led-quit' },
     );
   }
 

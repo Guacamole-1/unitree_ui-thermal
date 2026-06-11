@@ -23,6 +23,11 @@ export interface SettingsCallbacks {
   onRadarToggle: (enabled: boolean) => void;
   onLidarToggle: (enabled: boolean) => void;
   onLampSet: (level: number) => void;
+  /** Set the RGB status LED to a named colour, optionally blinking
+   *  (vui api 1007). Go2 only. */
+  onLedSet?: (color: string, blink: boolean) => void;
+  /** Turn the RGB status LED off (vui api 1008). Go2 only. */
+  onLedOff?: () => void;
   onVolumeSet: (level: number) => void;
   onWaistLockToggle?: (lock: boolean) => void;
   /** Toggle the BLE remote-control radio on the dog (Go2 only). */
@@ -142,6 +147,10 @@ export class SettingsPage {
           this.brightnessValueEl = value;
         },
       ));
+      // RGB status LED — colour swatches + blink toggle + off (vui 1007/1008).
+      if (callbacks.onLedSet && callbacks.onLedOff) {
+        multimedia.appendChild(this.buildLedSection(callbacks.onLedSet, callbacks.onLedOff));
+      }
     }
     this.appendIfPopulated(content, multimedia);
 
@@ -390,6 +399,122 @@ export class SettingsPage {
     section.appendChild(range);
 
     register(range, value);
+    return section;
+  }
+
+  /** RGB status-light control: a row of colour swatches, a Blink toggle, and
+   *  an Off button. Picking a swatch sends vui 1007 with the current blink
+   *  state; Off sends vui 1008. The Go2's named colours come from the VUI
+   *  service (white/red/yellow/blue/green/cyan/purple). */
+  private buildLedSection(
+    onLedSet: (color: string, blink: boolean) => void,
+    onLedOff: () => void,
+  ): HTMLElement {
+    const LED_COLORS: { name: string; hex: string }[] = [
+      { name: 'white', hex: '#ffffff' },
+      { name: 'red', hex: '#ff3b3b' },
+      { name: 'yellow', hex: '#ffe11a' },
+      { name: 'green', hex: '#36e04a' },
+      { name: 'cyan', hex: '#28e0e0' },
+      { name: 'blue', hex: '#5566ff' },
+      { name: 'purple', hex: '#a64dff' },
+    ];
+
+    let selected: string | null = null;
+    let blink = false;
+
+    const section = document.createElement('div');
+    section.className = 'settings-section settings-section-slider';
+
+    const head = document.createElement('div');
+    head.className = 'settings-section-head';
+    const text = document.createElement('div');
+    text.className = 'settings-text';
+    const t = document.createElement('div');
+    t.className = 'settings-title';
+    t.textContent = 'Status LED';
+    text.appendChild(t);
+    const d = document.createElement('div');
+    d.className = 'settings-desc';
+    d.textContent = 'Head RGB light — pick a colour, toggle blink, or turn off.';
+    text.appendChild(d);
+    head.appendChild(text);
+
+    // Top-right control cluster: Blink toggle + Off button.
+    const corner = document.createElement('div');
+    corner.style.cssText = 'display:flex;align-items:center;gap:10px;flex:0 0 auto;';
+
+    const blinkLabel = document.createElement('label');
+    blinkLabel.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-secondary,#b0b3bb);cursor:pointer;';
+    blinkLabel.title = 'Blink the LED';
+    const blinkToggle = document.createElement('label');
+    blinkToggle.className = 'settings-toggle';
+    const blinkInput = document.createElement('input');
+    blinkInput.type = 'checkbox';
+    blinkInput.addEventListener('change', () => {
+      blink = blinkInput.checked;
+      // Re-apply to the active colour so the change takes effect immediately.
+      if (selected) onLedSet(selected, blink);
+    });
+    const blinkSliderEl = document.createElement('span');
+    blinkSliderEl.className = 'settings-toggle-slider';
+    blinkToggle.appendChild(blinkInput);
+    blinkToggle.appendChild(blinkSliderEl);
+    const blinkTextEl = document.createElement('span');
+    blinkTextEl.textContent = 'Blink';
+    blinkLabel.appendChild(blinkTextEl);
+    blinkLabel.appendChild(blinkToggle);
+
+    const off = document.createElement('button');
+    off.type = 'button';
+    off.textContent = 'Off';
+    off.style.cssText =
+      'padding:5px 14px;border-radius:6px;border:1px solid #3a3d45;' +
+      'background:rgba(255,255,255,.06);color:#c3c9e9;font-size:13px;cursor:pointer;flex:0 0 auto;';
+
+    corner.appendChild(blinkLabel);
+    corner.appendChild(off);
+    head.appendChild(corner);
+    section.appendChild(head);
+
+    // Swatch row.
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px;';
+
+    const swatchEls: HTMLButtonElement[] = [];
+    const markSelected = () => {
+      swatchEls.forEach((el) => {
+        const on = el.dataset.color === selected;
+        el.style.outline = on ? '2px solid #fff' : '2px solid transparent';
+        el.style.transform = on ? 'scale(1.12)' : 'scale(1)';
+      });
+    };
+
+    for (const c of LED_COLORS) {
+      const sw = document.createElement('button');
+      sw.type = 'button';
+      sw.dataset.color = c.name;
+      sw.title = c.name;
+      sw.setAttribute('aria-label', `Set LED ${c.name}`);
+      sw.style.cssText =
+        `width:26px;height:26px;border-radius:50%;border:1.5px solid rgba(0,0,0,.35);cursor:pointer;` +
+        `background:${c.hex};outline:2px solid transparent;outline-offset:1px;transition:transform .12s,outline-color .12s;padding:0;`;
+      sw.addEventListener('click', () => {
+        selected = c.name;
+        markSelected();
+        onLedSet(c.name, blink);
+      });
+      swatchEls.push(sw);
+      row.appendChild(sw);
+    }
+    section.appendChild(row);
+
+    off.addEventListener('click', () => {
+      selected = null;
+      markSelected();
+      onLedOff();
+    });
+
     return section;
   }
 
