@@ -3,7 +3,7 @@ import { ConnectionPanel } from './connection-panel';
 import { Joystick } from './components/joystick';
 import { GamepadManager } from './components/gamepad-manager';
 import { NavBar } from './components/status-bar';
-import { ActionBar, g1ModeToState } from './components/action-bar';
+import { ActionBar, g1ModeToState, go2DecodeState, go2McfSeedState, GO2_MCF_SEED_STATES } from './components/action-bar';
 import { PipCamera } from './components/pip-camera';
 import { EmergencyStop, type InputSource } from './components/side-buttons';
 import { SettingsDrawer } from './components/settings-drawer';
@@ -102,6 +102,9 @@ export class App {
   /** In-flight arm (G1 teaching) requests keyed by request id → resolver.
    *  Resolves with { code, data } so callers can branch on the status code. */
   private armPending = new Map<number, (r: { code: number; data: unknown }) => void>();
+  /** mcf only: sport request id → go2State to seed into go2McfLast once the send
+   *  is acked with code 0 (the app's sQ for Lock/Run/StaticWalk/Endurance). */
+  private mcfSeedPending = new Map<number, string>();
   private teachingPage: TeachingPage | null = null;
   /** 1 Hz keepalive sent while recording a teaching action (api 7110,
    *  action_name:"") — the robot stops recording if it goes silent. */
@@ -605,7 +608,7 @@ export class App {
       // publishRequestLogged opens a collapsed devtools group with the
       // structured request inside; the matching response comes through
       // logResponse() in handleTopicMessage.
-      this.publishRequestLogged(topic, action.apiId, action.param, {
+      const reqId = this.publishRequestLogged(topic, action.apiId, action.param, {
         label: `action ${action.name}`,
         extra: {
           actionName: action.name,
@@ -613,6 +616,18 @@ export class App {
           g1Key: action.g1Key ?? null,
         },
       });
+      // mcf 1:1 (the app's sQ): Lock/Run/StaticWalk/Endurance report BalanceStand
+      // in error_code, so the highlight only sticks if we seed go2McfLast on a
+      // successful send. Track the request id; apply when its response acks 0.
+      if (
+        cloudApi.connectFamily !== 'G1' &&
+        this.robotState.motionMode === 'mcf' &&
+        reqId !== undefined &&
+        action.go2State !== undefined &&
+        GO2_MCF_SEED_STATES.has(action.go2State)
+      ) {
+        this.mcfSeedPending.set(reqId, action.go2State);
+      }
     });
     opWrapper.appendChild(w2);
 
@@ -1383,12 +1398,12 @@ export class App {
       if (msg.topic === 'rt/api/robot_state/response') { this.handleRobotStateResponse(msg.data); return; }
       if (msg.topic === 'rt/api/robot_type_service/response') { this.handleRobotTypeResponse(msg.data); return; }
       if (msg.topic === 'rt/api/arm/response') { this.handleArmResponse(msg.data); return; }
-      // sport/loco responses have no further handling — logResponse
-      // above is the entire story for these topics.
+      // sport/loco responses are otherwise only logged (logResponse above),
+      // but mcf needs the success ack to seed go2McfLast (the app's sQ).
       if (
         msg.topic === 'rt/api/sport/response' ||
         msg.topic === 'rt/api/loco/response'
-      ) return;
+      ) { this.handleSportResponse(msg.data); return; }
     }
 
     if (!msg.topic || !msg.data) return;
@@ -1647,6 +1662,7 @@ export class App {
       mode?: number;
       fsm_id?: number;
       gait_type?: number;
+      error_code?: number;
     };
 
     // G1 publishes the current locomotion state in `fsm_id` rather than
@@ -1665,6 +1681,17 @@ export class App {
     // Squat-Up / Lie Up need current state = Damp).
     if (cloudApi.connectFamily === 'G1' && currentMode !== undefined) {
       this.actionBar?.setG1State(g1ModeToState(currentMode));
+    }
+    // Go2: highlight the action-bar row matching the robot's live sport state
+    // (the blue current-mode indicator). Decoded straight from
+    // LF_SPORT_MOD_STATE — relies on the robot, no optimistic guessing. The
+    // motion_switcher name selects the mechanism: "mcf" reports the mode in
+    // error_code; the other modes report it in the small `mode` enum.
+    if (cloudApi.connectFamily !== 'G1') {
+      this.actionBar?.setGo2State(go2DecodeState(
+        { mode: d.mode, gait_type: d.gait_type, error_code: d.error_code },
+        this.robotState.motionMode,
+      ));
     }
 
     if (this.scene3d && d.position && d.imu_state?.quaternion) {
@@ -1932,6 +1959,21 @@ export class App {
     if (this.currentScreen === 'status' && this.statusPage) {
       this.statusPage.update(this.robotState);
     }
+  }
+
+  /** mcf 1:1 (the app's sQ): when a Lock/Run/StaticWalk/Endurance command is
+   *  acked with code 0, seed go2McfLast so the highlight holds even while the
+   *  robot reports BalanceStand in error_code. Correlated by request id, which
+   *  the robot echoes in header.identity.id. */
+  private handleSportResponse(data: unknown): void {
+    if (this.mcfSeedPending.size === 0) return;
+    const d = data as { header?: { identity?: { id?: number }; status?: { code?: number } } };
+    const id = d.header?.identity?.id;
+    if (id === undefined) return;
+    const seed = this.mcfSeedPending.get(id);
+    if (seed === undefined) return;
+    this.mcfSeedPending.delete(id);
+    if (d.header?.status?.code === 0) go2McfSeedState(seed);
   }
 
   private handleMotionSwitcherResponse(data: unknown): void {
@@ -2775,6 +2817,7 @@ export class App {
     this.audioListCache = null;
     this.audioPending.clear();
     this.armPending.clear();
+    this.mcfSeedPending.clear();
     this.stopTeachHeartbeat();
     this.teachingPage?.destroy();
     this.teachingPage = null;

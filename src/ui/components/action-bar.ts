@@ -61,6 +61,148 @@ export interface RobotAction {
    *  'shakeHands_1' for arm actions). The gating rules below are keyed
    *  on these strings — keep them stable. */
   g1Key?: string;
+  /** Go2 only: the SPORT_STATE this row represents (lowercase app name, e.g.
+   *  'freeBound'). The current-mode highlight matches it against the robot's
+   *  live state decoded from LF_SPORT_MOD_STATE via go2DecodeState(). Only
+   *  persistent modes carry one (one-shot tricks don't). */
+  go2State?: string;
+}
+
+// Go2 sport-state decoding. The robot runs one of several motion-control modes
+// (motion_switcher name: normal / advanced / ai / ai-w / mcf). These are
+// robot-agnostic — they apply across AIR / PRO / EDU. Which FIELD carries the
+// current mode depends on the active mode:
+//
+//  • normal / advanced / ai / ai-w: the active mode is the SMALL mode-dependent
+//    enum in LF_SPORT_MOD_STATE.mode (0-20). go2DecodeState() below uses the AI
+//    map, the one exposing the AI gaits (FreeBound/FreeJump/FreeAvoid).
+//  • mcf: `mode` stays 0; the active mode is reported in `error_code` as a full
+//    mode CODE (NOT a bitfield), decoded via GO2_ERR_MODE_MAP. A robot in
+//    FreeBound under mcf reports error_code=2008, mode=0.
+//
+// The caller (app.ts) picks the mechanism from the motion_switcher name.
+const GO2_MODE_MAP: Record<number, string> = {
+  0: 'idle',
+  1: 'balanceStand',
+  2: 'pose',
+  3: 'locomotion',
+  5: 'lieDown',
+  6: 'jointLock',
+  7: 'damping',
+  8: 'recoveryStand',
+  9: 'freeWalk',
+  10: 'sit',
+  15: 'freeBound',
+  16: 'freeJump',
+  17: 'freeAvoid',
+  18: 'stair',
+  19: 'stand',
+  20: 'crossStep',
+};
+// gait_type index → gait name.
+const GO2_GAIT = ['idle', 'walk', 'run', 'stair', 'downStair', 'adjust'];
+
+// mcf mode — error_code value → action-bar go2State. Unlike the other modes,
+// error_code here is a full mode code, not a bitfield. (Note: command api_ids
+// differ from these state codes — e.g. the FreeJump command is 2047 but the
+// robot reports 2009 while jumping.) A few codes are normalised to the row tag
+// the standard `mode` decoder already uses, so one row highlights under either
+// mode: StandUp(1002)=lock→jointLock, StandDown(1004)=crouch→lieDown,
+// StaticWalk(1015)→walk, WalkStair(2010)→stair.
+const GO2_ERR_MODE_MAP: Record<number, string> = {
+  0: 'idle',
+  100: 'freeWalk',
+  1001: 'damping',
+  1002: 'jointLock',
+  1004: 'lieDown',
+  1005: 'move',
+  1006: 'hello',
+  1007: 'sit',
+  1013: 'balanceStand',
+  1015: 'walk',
+  1016: 'run',
+  1017: 'batteryLife',
+  1091: 'pose',
+  2007: 'freeAvoid',
+  2008: 'freeBound',
+  2009: 'freeJump',
+  2010: 'stair',
+  2011: 'handStand',
+  2016: 'crossStep',
+  2017: 'backStand',
+  2019: 'leadFollow',
+  2021: 'rageMode',
+};
+
+export interface Go2SportRaw {
+  mode?: number;
+  gait_type?: number;
+  error_code?: number;
+}
+
+// mcf persistent "last real mode": a BalanceStand / idle / unknown frame keeps
+// showing the previously selected gait instead of dropping the highlight — under
+// mcf you stay "in" the chosen gait until you switch to another.
+let go2McfLast = 'freeWalk';
+
+/** mcf mode: decode the active mode straight from error_code, which is a full
+ *  mode code here, not a bitfield. */
+export function go2DecodeStateMcf(err: number): string {
+  if (!err) return 'freeWalk';
+  const mapped = GO2_ERR_MODE_MAP[err];
+  if (mapped === 'idle' || mapped === 'hello') return 'freeWalk';
+  if (mapped === 'balanceStand' || !mapped) return go2McfLast;
+  go2McfLast = mapped;
+  return mapped;
+}
+
+/** Seed the mcf "last real mode" (the app's sQ()): on a SUCCESSFUL send of Lock
+ *  / Run / Static Walk / Endurance the app writes go2McfLast directly, because
+ *  in those standing-ish states the robot reports BalanceStand in error_code, so
+ *  the highlight would otherwise fall through. Caller passes the row's go2State. */
+export function go2McfSeedState(state: string): void {
+  go2McfLast = state;
+}
+
+/** The exact set of states the app seeds optimistically on a successful send
+ *  (sQ for StandUp/Run/StaticWalk/BatteryLife), in this project's row tags. */
+export const GO2_MCF_SEED_STATES: ReadonlySet<string> = new Set([
+  'jointLock', // StandUp (lock)
+  'run',       // Run
+  'walk',      // StaticWalk
+  'batteryLife', // BatteryLife (Endurance)
+]);
+
+/** Decode the Go2's current SPORT_STATE for the action-bar highlight.
+ *  `motionMode` is the motion_switcher name: 'mcf' reads the mode out of
+ *  error_code (go2DecodeStateMcf); every other mode reports it in the small
+ *  `mode` enum. error_code bits (non-mcf modes): 0=continuousGait, 1=standOut,
+ *  4=batteryLife, 5=leadFollow. Returns 'balanceStand' when idle (mode 0). */
+export function go2DecodeState(d: Go2SportRaw, motionMode?: string): string {
+  if (motionMode === 'mcf') return go2DecodeStateMcf(d.error_code ?? 0);
+  const mode = d.mode ?? 0;
+  const gait = d.gait_type ?? 0;
+  const err = d.error_code ?? 0;
+  if (!mode) return 'balanceStand';
+  if ((err >> 1) & 1) return 'standOut';
+  const continuousGait = err & 1;
+  if ((err >> 4) & 1) return 'batteryLife';
+  if ((err >> 5) & 1) return 'leadFollow';
+  const state = GO2_MODE_MAP[mode];
+  const gaitName = GO2_GAIT[gait] ?? 'walk';
+  if (!state || state === 'idle') return 'balanceStand';
+  if (state === 'damping' || state === 'jointLock') return state;
+  const locomotionGaits = ['run', 'stair', 'downStair'];
+  if (state === 'locomotion' || locomotionGaits.includes(gaitName) || continuousGait === 1) {
+    switch (gaitName) {
+      case 'walk': return continuousGait ? 'continuousWalk' : 'walk';
+      case 'run': return continuousGait ? 'continuousRun' : 'run';
+      case 'stair': return 'stair';
+      case 'downStair': return 'downStair';
+      default: return 'walk';
+    }
+  }
+  return state;
 }
 
 const DATA_TRUE = '{"data":true}';
@@ -94,30 +236,30 @@ export const GO2_ACTIONS: RobotAction[] = [
   { apiId: SPORT_CMD.BackFlip, name: 'Back Flip', icon: '/icons/hand_stand.svg', param: DATA_TRUE, families: GO2 },
   { apiId: SPORT_CMD.LeftFlip, name: 'Left Flip', icon: '/icons/mode_bound.svg', param: DATA_TRUE, families: GO2 },
   // Moved from modes: these are one-shot postures, not persistent modes
-  { apiId: SPORT_CMD.Damp, name: 'Damping', icon: '/icons/mode_damping.svg', families: GO2 },
-  { apiId: SPORT_CMD.Sit, name: 'Sit Down', icon: '/icons/sitDown.svg', families: GO2 },
-  { apiId: SPORT_CMD.StandDown, name: 'Crouch', icon: '/icons/lieDown.svg', families: GO2 },
-  { apiId: SPORT_CMD.StandUp, name: 'Lock On', icon: '/icons/mode_locking.svg', families: GO2 },
+  { apiId: SPORT_CMD.Damp, name: 'Damping', icon: '/icons/mode_damping.svg', families: GO2, go2State: 'damping' },
+  { apiId: SPORT_CMD.Sit, name: 'Sit Down', icon: '/icons/sitDown.svg', families: GO2, go2State: 'sit' },
+  { apiId: SPORT_CMD.StandDown, name: 'Crouch', icon: '/icons/lieDown.svg', families: GO2, go2State: 'lieDown' },
+  { apiId: SPORT_CMD.StandUp, name: 'Lock On', icon: '/icons/mode_locking.svg', families: GO2, go2State: 'jointLock' },
 ];
 
 /** Go2 modes (persistent postures) — fire to rt/api/sport/request. */
 export const GO2_MODES: RobotAction[] = [
-  { apiId: SPORT_CMD.FreeWalk, name: 'Free Walk', icon: '/icons/mode_freeWalk.svg', param: DATA_TRUE, families: GO2 },
-  { apiId: SPORT_CMD.Pose, name: 'Pose', icon: '/icons/mode_pose.svg', param: DATA_TRUE, families: GO2 },
-  { apiId: SPORT_CMD.SwitchGait, name: 'Run', icon: '/icons/mode_run.svg', param: '{"data":1}', families: GO2 },
-  { apiId: SPORT_CMD.WalkStair, name: 'Walk Stair', icon: '/icons/mode_climbingStairs.svg', param: DATA_TRUE, families: GO2 },
-  { apiId: SPORT_CMD.StaticWalk, name: 'Static Walk', icon: '/icons/mode_walk.svg', param: DATA_TRUE, families: GO2 },
-  { apiId: SPORT_CMD.EconomicGait, name: 'Endurance', icon: '/icons/mode_batteryLife.svg', param: DATA_TRUE, families: GO2 },
-  { apiId: SPORT_CMD.LeadFollow, name: 'Leash', icon: '/icons/mode_traction.svg', param: DATA_TRUE, families: GO2 },
-  { apiId: SPORT_CMD.HandStand, name: 'Hand Stand', icon: '/icons/hand_stand.svg', param: DATA_TRUE, families: GO2 },
-  { apiId: SPORT_CMD.FreeAvoid, name: 'Free Avoid', icon: '/icons/mode_ai_avoid.svg', param: DATA_TRUE, families: GO2 },
-  { apiId: SPORT_CMD.FreeBound, name: 'Bound', icon: '/icons/mode_ai_bound.svg', param: DATA_TRUE, families: GO2 },
-  { apiId: SPORT_CMD.FreeJump, name: 'Jump', icon: '/icons/mode_bound.svg', param: DATA_TRUE, families: GO2 },
-  { apiId: SPORT_CMD.RecoveryStand, name: 'Stand', icon: '/icons/mode_stand.svg', families: GO2 },
-  { apiId: SPORT_CMD.CrossStep, name: 'Cross Step', icon: '/icons/mode_crossStep.svg', param: DATA_TRUE, families: GO2 },
+  { apiId: SPORT_CMD.FreeWalk, name: 'Free Walk', icon: '/icons/mode_freeWalk.svg', param: DATA_TRUE, families: GO2, go2State: 'freeWalk' },
+  { apiId: SPORT_CMD.Pose, name: 'Pose', icon: '/icons/mode_pose.svg', param: DATA_TRUE, families: GO2, go2State: 'pose' },
+  { apiId: SPORT_CMD.SwitchGait, name: 'Run', icon: '/icons/mode_run.svg', param: '{"data":1}', families: GO2, go2State: 'run' },
+  { apiId: SPORT_CMD.WalkStair, name: 'Walk Stair', icon: '/icons/mode_climbingStairs.svg', param: DATA_TRUE, families: GO2, go2State: 'stair' },
+  { apiId: SPORT_CMD.StaticWalk, name: 'Static Walk', icon: '/icons/mode_walk.svg', param: DATA_TRUE, families: GO2, go2State: 'walk' },
+  { apiId: SPORT_CMD.EconomicGait, name: 'Endurance', icon: '/icons/mode_batteryLife.svg', param: DATA_TRUE, families: GO2, go2State: 'batteryLife' },
+  { apiId: SPORT_CMD.LeadFollow, name: 'Leash', icon: '/icons/mode_traction.svg', param: DATA_TRUE, families: GO2, go2State: 'leadFollow' },
+  { apiId: SPORT_CMD.HandStand, name: 'Hand Stand', icon: '/icons/hand_stand.svg', param: DATA_TRUE, families: GO2, go2State: 'handStand' },
+  { apiId: SPORT_CMD.FreeAvoid, name: 'Free Avoid', icon: '/icons/mode_ai_avoid.svg', param: DATA_TRUE, families: GO2, go2State: 'freeAvoid' },
+  { apiId: SPORT_CMD.FreeBound, name: 'Bound', icon: '/icons/mode_ai_bound.svg', param: DATA_TRUE, families: GO2, go2State: 'freeBound' },
+  { apiId: SPORT_CMD.FreeJump, name: 'Jump', icon: '/icons/mode_bound.svg', param: DATA_TRUE, families: GO2, go2State: 'freeJump' },
+  { apiId: SPORT_CMD.RecoveryStand, name: 'Stand', icon: '/icons/mode_stand.svg', families: GO2, go2State: 'balanceStand' },
+  { apiId: SPORT_CMD.CrossStep, name: 'Cross Step', icon: '/icons/mode_crossStep.svg', param: DATA_TRUE, families: GO2, go2State: 'crossStep' },
   // Moved from actions: these are persistent postures (remain active until next command)
-  { apiId: SPORT_CMD.BackStand, name: 'Rear Stand', icon: '/icons/mode_ai_stand.svg', param: DATA_TRUE, families: GO2 },
-  { apiId: SPORT_CMD.RageMode, name: 'Rage', icon: '/icons/mode_runaway.svg', param: DATA_TRUE, families: GO2 },
+  { apiId: SPORT_CMD.BackStand, name: 'Rear Stand', icon: '/icons/mode_ai_stand.svg', param: DATA_TRUE, families: GO2, go2State: 'backStand' },
+  { apiId: SPORT_CMD.RageMode, name: 'Rage', icon: '/icons/mode_runaway.svg', param: DATA_TRUE, families: GO2, go2State: 'rageMode' },
 ];
 
 // G1 mode/gesture indices. Every G1 row carries the same api_id (7101
@@ -257,6 +399,10 @@ export class ActionBar {
    *  the host app via setG1State(). Defaults to Idle (treated as
    *  "unknown" → permissive). */
   private g1State: G1State = G1_STATE.Idle;
+  /** Current Go2 sport state (SPORT_STATE name) decoded from
+   *  LF_SPORT_MOD_STATE.mode, set via setGo2State(). undefined = no active
+   *  persistent mode (idle/unknown) → nothing highlighted. */
+  private go2State: string | undefined;
 
   // Items that appear in the shortcut bar
   private shortcuts: ShortcutRef[];
@@ -529,12 +675,14 @@ export class ActionBar {
     return item;
   }
 
-  /** Highlight the row whose g1Key matches the current G1 sport state
-   *  (the "blue" current-mode indicator in the Unitree app). */
+  /** Highlight the row matching the robot's current sport state — the
+   *  "blue" current-mode indicator in the Unitree app. G1 matches on g1Key
+   *  vs the FSM state; Go2 matches on go2State vs the decoded `mode`. */
   private isCurrentMode(action: RobotAction): boolean {
-    return cloudApi.connectFamily === 'G1'
-      && action.g1Key !== undefined
-      && action.g1Key === this.g1State;
+    if (cloudApi.connectFamily === 'G1') {
+      return action.g1Key !== undefined && action.g1Key === this.g1State;
+    }
+    return action.go2State !== undefined && action.go2State === this.go2State;
   }
 
   /** Whether the given action should be active right now. Go2 rows are
@@ -550,6 +698,16 @@ export class ActionBar {
   setG1State(state: G1State): void {
     if (this.g1State === state) return;
     this.g1State = state;
+    this.buildShortcutItems();
+    if (this.popup) this.rebuildPopupGrid();
+  }
+
+  /** Called by the host (app.ts) when LF_SPORT_MOD_STATE arrives for Go2.
+   *  `state` is the SPORT_STATE name decoded from the robot's reported mode
+   *  (go2DecodeState). Re-renders so the matching row shows the highlight. */
+  setGo2State(state: string | undefined): void {
+    if (this.go2State === state) return;
+    this.go2State = state;
     this.buildShortcutItems();
     if (this.popup) this.rebuildPopupGrid();
   }
