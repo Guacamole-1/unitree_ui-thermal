@@ -366,7 +366,6 @@ export class AccountPage {
       row.appendChild(info);
       profile.appendChild(row);
       if (u.mobile) this.infoRow(profile, 'Mobile', u.mobile);
-      this.infoRow(profile, 'Gender', u.gender === 1 ? 'Male' : u.gender === 2 ? 'Female' : 'Not set');
       if (u.roles?.length) this.infoRow(profile, 'Roles', u.roles.join(', '));
     }
     this.content.appendChild(profile);

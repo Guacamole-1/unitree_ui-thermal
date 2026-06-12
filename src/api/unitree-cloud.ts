@@ -162,7 +162,6 @@ export interface UserInfo {
   avatar: string;
   email: string;
   mobile: string;
-  gender: number;
   roles: number[];
 }
 
