@@ -882,6 +882,38 @@ export class UnitreeCloudAPI {
     return [];
   }
 
+  /**
+   * User-manual web links (Robot / Remote Control / Battery Charger). Unlike
+   * the tutorial list these are NOT a cloud list endpoint — the app's
+   * ManualActivity builds deterministic marketing.unitree.com pages whose path
+   * carries the device series + language:
+   *   https://marketing.unitree.com/article/<lang>/<series>/<page>.html
+   * (the app stores a "/H1/" template and string-replaces "/H1/" → "/<series>/"
+   * in startSystemWeb).
+   *   lang   : cn → "zh", otherwise "en"
+   *   series : Go2 → "Go2"; G1 → "G1-D" for the EDU/D variant (model "d"/"day"
+   *            or a couple of known SNs), else "G1"
+   *   pages  : User_Manual.html, Remote_Control.html, Battery_Charger.html
+   */
+  async getManualLinks(): Promise<Array<{ title: string; url: string }>> {
+    const lang = this._region === 'cn' ? 'zh' : 'en';
+    let series: string = this._family; // "Go2" | "G1"
+    if (this._family === 'G1') {
+      try {
+        const devs = await this.listDevices();
+        const g1 = devs.find((d) => d.series === 'G1');
+        const model = (g1?.model || '').toLowerCase();
+        if (model === 'd' || model === 'day') series = 'G1-D';
+      } catch { /* fall back to plain G1 */ }
+    }
+    const base = `https://marketing.unitree.com/article/${lang}/${series}`;
+    return [
+      { title: 'Robot', url: `${base}/User_Manual.html` },
+      { title: 'Remote Control', url: `${base}/Remote_Control.html` },
+      { title: 'Battery Charger', url: `${base}/Battery_Charger.html` },
+    ];
+  }
+
   async getChangelog(): Promise<ChangelogEntry[]> {
     try {
       const resp = await this.get<{ items: ChangelogEntry[] }>('app/version/intro/list', { lastId: '0' });

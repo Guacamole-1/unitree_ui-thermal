@@ -1104,9 +1104,10 @@ export class AccountPage {
   private async renderInfoTab(): Promise<void> {
     this.content.innerHTML = '<div style="color:#666;padding:20px;">Loading...</div>';
 
-    const [appVer, tutorials, changelog, notices] = await Promise.allSettled([
+    const [appVer, tutorials, manuals, changelog, notices] = await Promise.allSettled([
       cloudApi.getAppVersion(),
       cloudApi.getTutorials(),
+      cloudApi.getManualLinks(),
       cloudApi.getChangelog(),
       cloudApi.getNotices(),
     ]);
@@ -1146,26 +1147,59 @@ export class AccountPage {
       this.content.appendChild(s);
     }
 
-    // Tutorials
+    // User Manuals — static marketing.unitree.com pages for this device
+    // (Robot, Remote Control, Battery Charger). Same docs the app's Manual
+    // screen opens; each opens in a new tab.
+    const manualData = manuals.status === 'fulfilled' ? manuals.value : [];
+    if (manualData.length) {
+      // Distinct, recognizable icon per manual so they read at a glance.
+      const ICONS: Record<string, string> = {
+        Robot: '<rect x="5" y="8" width="14" height="11" rx="2"/><circle cx="9.5" cy="13" r="1.3" fill="#4fc3f7" stroke="none"/><circle cx="14.5" cy="13" r="1.3" fill="#4fc3f7" stroke="none"/><path d="M12 8V4"/><circle cx="12" cy="3" r="1.2"/><path d="M5 12H3M21 12h-2"/>',
+        'Remote Control': '<rect x="8" y="2" width="8" height="20" rx="3"/><circle cx="12" cy="6" r="1.3" fill="#4fc3f7" stroke="none"/><path d="M10.5 10h3M12 13v4"/>',
+        'Battery Charger': '<rect x="2" y="8" width="16" height="9" rx="2"/><path d="M22 11v3"/><path d="M10.5 10.5 8 13h3l-2.5 2.5"/>',
+      };
+      const fallback = '<path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>';
+      const s = this.section('User Manuals');
+      for (const m of manualData) {
+        const a = document.createElement('a');
+        a.href = m.url; a.target = '_blank'; a.referrerPolicy = 'no-referrer';
+        a.style.cssText = 'display:flex;align-items:center;gap:12px;padding:11px 0;border-bottom:1px solid #151820;text-decoration:none;color:inherit;cursor:pointer;';
+        const glyph = ICONS[m.title] || fallback;
+        a.innerHTML = `<span style="flex-shrink:0;width:34px;height:34px;border-radius:8px;background:rgba(79,195,247,0.12);display:flex;align-items:center;justify-content:center;"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#4fc3f7" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${glyph}</svg></span>
+          <span style="flex:1;font-size:13px;font-weight:500;">${this.esc(m.title)}</span>
+          <span style="font-size:11px;color:#4fc3f7;white-space:nowrap;">Open ↗</span>`;
+        s.appendChild(a);
+      }
+      this.content.appendChild(s);
+    }
+
+    // Guides & Manuals — the cloud tutorial/list set (how-to videos + user
+    // manual / web links) for this device, filtered by (series, model). Each
+    // row opens its URL, matching the app's guide screen.
     const tutData = tutorials.status === 'fulfilled' ? tutorials.value : [];
-    for (const group of tutData) {
-      const s = this.section(group.name);
-      for (const t of group.tutorials) {
-        if (!t || typeof t !== 'object') continue;
-        const row = document.createElement('div');
-        row.style.cssText = 'display:flex;gap:10px;padding:8px 0;border-bottom:1px solid #151820;align-items:center;';
+    const guides = tutData.flatMap((g) => g.tutorials).filter((t) => t && typeof t === 'object');
+    if (guides.length) {
+      const s = this.section('Tutorial Videos');
+      for (const t of guides) {
+        const hasUrl = !!t.url;
+        const row = document.createElement(hasUrl ? 'a' : 'div');
+        row.style.cssText = 'display:flex;gap:10px;padding:8px 0;border-bottom:1px solid #151820;align-items:center;text-decoration:none;color:inherit;' + (hasUrl ? 'cursor:pointer;' : '');
+        if (hasUrl) {
+          const a = row as HTMLAnchorElement;
+          a.href = t.url; a.target = '_blank'; a.referrerPolicy = 'no-referrer';
+        }
         if (t.cover) row.innerHTML = `<img src="${this.esc(t.cover)}" style="width:80px;height:45px;object-fit:cover;border-radius:4px;flex-shrink:0;">`;
         const info = document.createElement('div');
         info.style.cssText = 'flex:1;min-width:0;';
         info.innerHTML = `<div style="font-size:13px;font-weight:500;">${this.esc(t.title || '')}</div>`;
-        if (t.duration) info.innerHTML += `<div style="font-size:11px;color:#666;">${(t.duration / 60).toFixed(1)} min</div>`;
+        if (t.description) info.innerHTML += `<div style="font-size:11px;color:#888;margin-top:2px;line-height:1.4;">${this.esc(t.description)}</div>`;
+        if (t.duration) info.innerHTML += `<div style="font-size:11px;color:#666;margin-top:2px;">${(t.duration / 60).toFixed(1)} min</div>`;
         row.appendChild(info);
-        if (t.url) {
-          const a = document.createElement('a');
-          a.href = t.url; a.target = '_blank';
-          a.style.cssText = 'font-size:11px;color:#4fc3f7;flex-shrink:0;';
-          a.textContent = 'Watch';
-          row.appendChild(a);
+        if (hasUrl) {
+          const open = document.createElement('span');
+          open.style.cssText = 'font-size:11px;color:#4fc3f7;flex-shrink:0;white-space:nowrap;';
+          open.textContent = 'Open ↗';
+          row.appendChild(open);
         }
         s.appendChild(row);
       }
