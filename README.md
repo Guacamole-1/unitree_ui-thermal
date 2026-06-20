@@ -123,7 +123,7 @@ server/
 
 ## Acknowledgements
 
-Big thanks to the [TheRoboVerse](https://theroboverse.com) community.
+Big thanks to the [RoboLegion](https://robolegion.com) community.
 
 ## Support
 
