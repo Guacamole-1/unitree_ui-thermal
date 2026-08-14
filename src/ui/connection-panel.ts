@@ -25,6 +25,7 @@ export class ConnectionPanel {
   private robotPickerGroup!: HTMLElement;
   private robotSelect!: HTMLSelectElement;
   private loginBtn!: HTMLButtonElement;
+  private thermalCheckBox!: HTMLInputElement;
   private useToken = false;
   private remoteLoggedIn = false;
   private selectedSn = '';
@@ -81,6 +82,9 @@ export class ConnectionPanel {
         <input type="text" id="token-input" placeholder="Paste access token" />
         <div id="token-info-panel" style="display:none;margin-top:6px;padding:8px 10px;border:1px solid var(--border-color,#444);border-radius:6px;font-family:monospace;font-size:11px;line-height:1.5;background:rgba(255,255,255,0.03);"></div>
       </div>
+	<input type="checkbox" id="thermal-checkbox" name="therm" checked>
+	<label for="thermal-checkbox">Connect to thermal camera</label>
+	<br><br>
       <button id="login-btn" class="btn-connect" style="display:none">Login</button>
       <div class="form-group" id="robot-picker-group" style="display:none">
         <label>Choose Robot for WebView</label>
@@ -102,6 +106,7 @@ export class ConnectionPanel {
     this.authToggle = this.container.querySelector('#auth-toggle')!;
     this.robotPickerGroup = this.container.querySelector('#robot-picker-group')!;
     this.robotSelect = this.container.querySelector('#robot-select')!;
+	this.thermalCheckBox = this.container.querySelector('#thermal-checkbox')!;
 
     for (const [mode, label] of Object.entries(MODE_LABELS)) {
       const option = document.createElement('option');
@@ -167,7 +172,13 @@ export class ConnectionPanel {
   private updateVisibility(): void {
     const mode = this.modeSelect.value as ConnectionMode;
     const isRemote = mode === 'STA-T';
-
+	// Checkbox only available for STA-L (current network) for now
+	  if (mode !== 'STA-L'){
+		this.thermalCheckBox.disabled = true;
+		this.thermalCheckBox.checked = false;
+	  }else {
+		this.thermalCheckBox.disabled = false;
+	  }
     // Swap the connection-mode hero illustration (APK icons)
     const heroImg = this.container.querySelector('#mode-hero-img') as HTMLImageElement;
     const heroBadge = this.container.querySelector('#mode-hero-badge') as HTMLImageElement;
@@ -218,6 +229,7 @@ export class ConnectionPanel {
     if (mode === 'AP') {
       this.ipInput.value = DEFAULT_AP_IP;
       this.ipInput.readOnly = true;
+	  this.thermalCheckBox
     } else {
       this.ipInput.readOnly = false;
       if (this.ipInput.value === DEFAULT_AP_IP && mode === 'STA-L') {
@@ -302,7 +314,7 @@ export class ConnectionPanel {
         this.loginBtn.textContent = 'Login';
         return;
       }
-
+	  const useThermal = this.thermalCheckBox.checked;
       // Auto-select first robot and go straight to hub
       const firstSn = devices[0].sn;
       this.onConnect({
@@ -312,6 +324,7 @@ export class ConnectionPanel {
         serialNumber: firstSn,
         email: '',
         password: '',
+		thermal: useThermal
       });
     } catch (e) {
       this.setStatus(`Login failed: ${e instanceof Error ? e.message : String(e)}`, 'error');
@@ -323,6 +336,7 @@ export class ConnectionPanel {
 
   private handleConnect(): void {
     const mode = this.modeSelect.value as ConnectionMode;
+	const useThermal = this.thermalCheckBox.checked;
 
     if (mode === 'STA-T') {
       // For Remote mode, go to hub (WebRTC connect happens there)
@@ -339,6 +353,7 @@ export class ConnectionPanel {
         serialNumber: sn,
         email: '',
         password: '',
+		thermal: useThermal
       });
     } else {
       this.onConnect({
@@ -348,6 +363,7 @@ export class ConnectionPanel {
         serialNumber: '',
         email: '',
         password: '',
+		thermal: useThermal
       });
     }
   }

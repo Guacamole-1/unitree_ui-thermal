@@ -1,67 +1,76 @@
-export type PipContent = 'camera' | 'voxel';
+export type PipContent = 'camera' | 'voxel' | 'thermal';
 
 export class PipCamera {
-  private container: HTMLElement;
-  private videoEl: HTMLVideoElement;
-  private overlay: HTMLElement;
-  private noiseCanvas: HTMLCanvasElement;
-  private noiseCtx: CanvasRenderingContext2D;
-  private noiseAnimId = 0;
-  private hasStream = false;
-  private currentContent: PipContent = 'camera';
+  protected container: HTMLElement;
+  protected videoEl: HTMLVideoElement;
+  protected overlay: HTMLElement;
+  protected noiseCanvas: HTMLCanvasElement;
+  protected noiseCtx: CanvasRenderingContext2D;
+  protected noiseAnimId = 0;
+  protected hasStream = false;
+  protected currentContent: PipContent = 'camera';
 
   // Mini 3D canvas placeholder (will be populated by scene)
-  private miniCanvas: HTMLCanvasElement | null = null;
+  protected miniCanvas: HTMLCanvasElement | null = null;
 
   // Drag state
-  private dragging = false;
-  private dragStartX = 0;
-  private dragStartY = 0;
-  private offsetX = 0;
-  private offsetY = 0;
-  private hasMoved = false;
+  protected dragging = false;
+  protected dragStartX = 0;
+  protected dragStartY = 0;
+  protected offsetX = 0;
+  protected offsetY = 0;
+  protected hasMoved = false;
 
   // View swap callback
-  private onTap: (() => void) | null = null;
+  protected onTap: (() => void) | null = null;
 
-  constructor(parent: HTMLElement) {
-    this.container = document.createElement('div');
-    this.container.className = 'pip-camera';
+	constructor(parent: HTMLElement, initialX = 12, initialY = 56) {
 
-    this.videoEl = document.createElement('video');
-    this.videoEl.autoplay = true;
-    this.videoEl.playsInline = true;
-    this.videoEl.muted = true;
-    this.container.appendChild(this.videoEl);
+		this.container = document.createElement('div');
+		this.container.className = 'pip-camera';
+		this.container.style.left = '0px';
+		this.container.style.top = '0px';
+		this.offsetX = initialX;
+		this.offsetY = initialY;
+		this.container.style.transform = `translate(${initialX}px, ${initialY}px)`;
 
-    // White noise canvas (shown when no video)
-    this.noiseCanvas = document.createElement('canvas');
-    this.noiseCanvas.className = 'pip-noise';
-    this.noiseCanvas.width = 385;
-    this.noiseCanvas.height = 260;
-    this.noiseCtx = this.noiseCanvas.getContext('2d')!;
-    this.container.appendChild(this.noiseCanvas);
 
-    this.overlay = document.createElement('div');
-    this.overlay.className = 'pip-overlay';
-    this.overlay.textContent = 'No Video';
-    this.container.appendChild(this.overlay);
+		this.videoEl = document.createElement('video');
+		this.videoEl.autoplay = true;
+		this.videoEl.playsInline = true;
+		this.videoEl.muted = true;
+		this.container.appendChild(this.videoEl);
 
-    // Drag handlers
-    this.container.addEventListener('pointerdown', (e) => this.onPointerDown(e));
-    window.addEventListener('pointermove', (e) => this.onPointerMove(e));
-    window.addEventListener('pointerup', () => this.onPointerUp());
+		// White noise canvas (shown when no video)
+		this.noiseCanvas = document.createElement('canvas');
+		this.noiseCanvas.className = 'pip-noise';
+		this.noiseCanvas.width = 385;
+		this.noiseCanvas.height = 260;
+		this.noiseCtx = this.noiseCanvas.getContext('2d')!;
+		this.container.appendChild(this.noiseCanvas);
 
-    parent.appendChild(this.container);
+		this.overlay = document.createElement('div');
+		this.overlay.className = 'pip-overlay';
+		this.overlay.textContent = 'No Video';
+		this.overlay.style.color = 'red';
+		this.overlay.style.fontWeight = 'bold';
+		this.container.appendChild(this.overlay);
 
-    // Start white noise animation
-    this.startNoise();
+		// Drag handlers
+		this.container.addEventListener('pointerdown', (e) => this.onPointerDown(e));
+		window.addEventListener('pointermove', (e) => this.onPointerMove(e));
+		window.addEventListener('pointerup', () => this.onPointerUp());
+
+		parent.appendChild(this.container);
+
+		// Start white noise animation
+		this.startNoise();
   }
 
   setStream(stream: MediaStream): void {
     this.videoEl.srcObject = stream;
     this.hasStream = true;
-    if (this.currentContent === 'camera') {
+    if (this.currentContent !== 'voxel') {
       this.overlay.style.display = 'none';
       this.noiseCanvas.style.display = 'none';
       this.videoEl.style.display = 'block';
@@ -72,7 +81,7 @@ export class PipCamera {
   clear(): void {
     this.videoEl.srcObject = null;
     this.hasStream = false;
-    if (this.currentContent === 'camera') {
+    if (this.currentContent !== 'voxel') {
       this.videoEl.style.display = 'none';
       this.overlay.style.display = '';
       this.noiseCanvas.style.display = 'block';
@@ -119,9 +128,9 @@ export class PipCamera {
     this.container.style.display = '';
   }
 
-  private miniMirrorId = 0;
+  protected miniMirrorId = 0;
 
-  private startMiniCanvasMirror(source: HTMLCanvasElement): void {
+  protected startMiniCanvasMirror(source: HTMLCanvasElement): void {
     this.stopMiniCanvasMirror();
     if (!this.miniCanvas) return;
     const ctx = this.miniCanvas.getContext('2d');
@@ -137,14 +146,14 @@ export class PipCamera {
     this.miniMirrorId = requestAnimationFrame(mirror);
   }
 
-  private stopMiniCanvasMirror(): void {
+  protected stopMiniCanvasMirror(): void {
     if (this.miniMirrorId) {
       cancelAnimationFrame(this.miniMirrorId);
       this.miniMirrorId = 0;
     }
   }
 
-  private hideMiniCanvas(): void {
+  protected hideMiniCanvas(): void {
     this.stopMiniCanvasMirror();
     if (this.miniCanvas) this.miniCanvas.style.display = 'none';
   }
@@ -160,7 +169,7 @@ export class PipCamera {
 
   // ── White noise rendering ──
 
-  private startNoise(): void {
+  protected startNoise(): void {
     if (this.noiseAnimId) return;
     const draw = () => {
       this.drawNoise();
@@ -169,14 +178,14 @@ export class PipCamera {
     this.noiseAnimId = requestAnimationFrame(draw);
   }
 
-  private stopNoise(): void {
+  protected stopNoise(): void {
     if (this.noiseAnimId) {
       cancelAnimationFrame(this.noiseAnimId);
       this.noiseAnimId = 0;
     }
   }
 
-  private drawNoise(): void {
+  protected drawNoise(): void {
     const w = this.noiseCanvas.width;
     const h = this.noiseCanvas.height;
     const imageData = this.noiseCtx.createImageData(w, h);
@@ -193,7 +202,7 @@ export class PipCamera {
 
   // ── Drag handlers ──
 
-  private onPointerDown(e: PointerEvent): void {
+  protected onPointerDown(e: PointerEvent): void {
     this.dragging = true;
     this.hasMoved = false;
     this.dragStartX = e.clientX - this.offsetX;
@@ -202,7 +211,7 @@ export class PipCamera {
     this.container.style.transition = 'none';
   }
 
-  private onPointerMove(e: PointerEvent): void {
+  protected onPointerMove(e: PointerEvent): void {
     if (!this.dragging) return;
     const dx = e.clientX - this.dragStartX;
     const dy = e.clientY - this.dragStartY;
@@ -214,7 +223,7 @@ export class PipCamera {
     this.container.style.transform = `translate(${dx}px, ${dy}px)`;
   }
 
-  private onPointerUp(): void {
+  protected onPointerUp(): void {
     if (!this.dragging) return;
     this.dragging = false;
     this.container.style.transition = '';

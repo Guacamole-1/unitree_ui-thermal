@@ -361,12 +361,13 @@ body {
 }
 
 /* ── PIP Camera (Small View, Draggable) ── */
+.pip-thermal-camera,
 .pip-camera {
   position: absolute;
   top: 56px;
   left: 12px;
   width: 385px;
-  height: 260px;
+  height: 260px; /*260px*/
   background: #282828;
   border-radius: 8px;
   overflow: hidden;
@@ -384,7 +385,6 @@ body {
   width: 400px;
   height: 270px;
 }
-
 .pip-camera video {
   width: 100%;
   height: 100%;
@@ -402,6 +402,28 @@ body {
   justify-content: center;
   color: #555;
   font-size: 13px;
+}
+
+/* PipThermal */
+
+.pip-thermal-camera {
+  height: auto; /* so it has space for the stats*/
+  width: 320px;
+
+}
+.pip-thermal-camera video {
+	width: 100%;
+	object-fit: contain;
+}
+.pip-thermal-stats {
+    background: white;
+    color: black;
+    font-family: monospace;
+    font-size: 11px;
+    white-space: pre;
+    padding: 4px 8px;
+    width: 400px;
+    box-sizing: border-box;
 }
 
 /* ── Operation Layout (3-wrapper) ── */
