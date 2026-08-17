@@ -3,6 +3,7 @@ import type { WebRTCConnection } from '../connection/webrtc';
 import { handleValidation } from './validation';
 import { startHeartbeat, stopHeartbeat } from './heartbeat';
 import { DATA_CHANNEL_TYPE } from './topics';
+import { log } from '../ui/logger';
 
 export class DataChannelHandler {
   private webrtc: WebRTCConnection;
@@ -11,6 +12,8 @@ export class DataChannelHandler {
   lastValidationKey: string = '';
   /** App-level handler for topic data messages (set by App after construction). */
   onTopicData: ((msg: DataChannelMessage) => void) | null = null;
+  /** App-level handler for "errors" / "add_error" / "rm_error" wire messages. */
+  onErrorMessage: ((type: string, data: unknown) => void) | null = null;
 
   constructor(webrtc: WebRTCConnection, callbacks: ConnectionCallbacks) {
     this.webrtc = webrtc;
@@ -34,7 +37,7 @@ export class DataChannelHandler {
     if (msg.type === DATA_CHANNEL_TYPE.ERR) {
       const info = (msg as { info?: string }).info;
       if (info === 'Validation Needed.') {
-        console.log('[go2:dc] Re-sending validation (err: Validation Needed)');
+        log.webrtc.info('[go2:dc] Re-sending validation (err: Validation Needed)');
         handleValidation(
           { type: DATA_CHANNEL_TYPE.VALIDATION, topic: '', data: this.lastValidationKey },
           this.webrtc,
@@ -67,9 +70,18 @@ export class DataChannelHandler {
       return;
     }
 
-    // Silently ignore heartbeat echoes and error messages
+    // Silently ignore heartbeat echoes
     if (msg.type === DATA_CHANNEL_TYPE.HEARTBEAT) return;
-    if (msg.type === DATA_CHANNEL_TYPE.ERRORS) return;
+
+    // Robot fault messages — snapshot + per-fault deltas (add_error / rm_error)
+    if (
+      msg.type === DATA_CHANNEL_TYPE.ERRORS ||
+      msg.type === DATA_CHANNEL_TYPE.ADD_ERROR ||
+      msg.type === DATA_CHANNEL_TYPE.RM_ERROR
+    ) {
+      this.onErrorMessage?.(msg.type, msg.data);
+      return;
+    }
 
     // Forward topic data to the app-level handler (avoids recursive loop with callbacks.onMessage)
     if (this.onTopicData) {
@@ -104,26 +116,33 @@ export class DataChannelHandler {
     this.webrtc.send({ type, topic, data });
   }
 
-  /** Send a request matching the SDK format: header + parameter (JSON string) + binary. */
-  publishRequest(topic: string, apiId: number, parameter: string = '{}'): void {
+  /** Send a request matching the SDK format: header + parameter (JSON string) + binary.
+   *  Returns the generated `id` so the caller can correlate the response
+   *  (the robot echoes it back in `header.identity.id`).
+   *
+   *  `priority: 1` is used by emergency-stop / damping to jump the queue;
+   *  the policy object is only attached when priority is requested. */
+  publishRequest(
+    topic: string,
+    apiId: number,
+    parameter: string = '{}',
+    options: { priority?: boolean } = {},
+  ): number {
+    const id = Math.floor(Math.random() * 2147483647);
+    const header: { identity: { id: number; api_id: number }; policy?: { priority: number } } = {
+      identity: { id, api_id: apiId },
+    };
+    if (options.priority) header.policy = { priority: 1 };
     this.webrtc.send({
       type: DATA_CHANNEL_TYPE.REQUEST,
       topic,
       data: {
-        header: {
-          identity: {
-            id: Math.floor(Math.random() * 2147483647),
-            api_id: apiId,
-          },
-          policy: {
-            priority: 0,
-            noreply: false,
-          },
-        },
+        header,
         parameter,
         binary: [],
       },
     });
+    return id;
   }
 
   /** Request a static file from the robot. Returns base64 data via callback. */

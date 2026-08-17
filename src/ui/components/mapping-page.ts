@@ -3,8 +3,10 @@ import { RTC_TOPIC } from '../../protocol/topics';
 import SlamWorker from '../../workers/slam-worker?worker';
 import { putBundle, getBundle, deleteBundle, bytesToBase64, base64ToBytes, bundleToZip, zipToBundle, downloadBlob, type MapBundle } from '../../storage/map-pcd-store';
 import { theme } from '../theme';
+import { log, pipeWorkerLogs } from '../logger';
 import type { BluetoothStatus } from './bt-status-icon';
 import { PipCamera } from './pip-camera';
+import { makeCopyButton } from './copy-button';
 
 const BT_SVG = (color: string): string =>
   `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7l10 10-5 5V2l5 5L7 17"/></svg>`;
@@ -198,7 +200,6 @@ export class MappingPage {
   private wifiIconEl!: HTMLImageElement;
   private btIconWrap!: HTMLElement;
   private themeIconWrap!: HTMLElement;
-  private onBtClick: (() => void) | null = null;
   private unsubTheme: (() => void) | null = null;
   private pipCamera: PipCamera | null = null;
   private locHint!: HTMLElement;
@@ -221,7 +222,6 @@ export class MappingPage {
     onUnsubscribe: (topic: string) => void,
     onRequestFile?: (path: string, cb: (data: string | null) => void) => void,
     onPushFile?: (path: string, b64: string, onProgress?: (frac: number) => void) => Promise<void>,
-    onBtClick?: () => void,
   ) {
     this.onBack = onBack;
     this.publish = onPublish;
@@ -229,7 +229,6 @@ export class MappingPage {
     this.unsubscribe = onUnsubscribe;
     this.requestFile = onRequestFile ?? null;
     this.pushFile = onPushFile ?? null;
-    this.onBtClick = onBtClick ?? null;
 
     this.container = document.createElement('div');
     this.container.className = 'mapping-page';
@@ -287,8 +286,8 @@ export class MappingPage {
     renderTheme(theme().theme);
     this.unsubTheme = theme().onChange((t) => renderTheme(t));
 
-    // BT icon — hover effect + click forwards to the popover toggle.
-    this.btIconWrap.addEventListener('click', () => this.onBtClick?.());
+    // BT icon — passive status indicator (matches the floating one).
+    // BT controls live on the landing-page Bluetooth tile.
 
     this.container.appendChild(header);
 
@@ -342,11 +341,16 @@ export class MappingPage {
     // Init SLAM worker (libvoxel.wasm for point cloud processing)
     const worker = new SlamWorker();
     this.slamWorker = worker;
+    pipeWorkerLogs(worker, 'scene');
     worker.onmessage = (e: MessageEvent) => {
       const msg = e.data;
+      // pipeWorkerLogs forwards log frames to log.scene; bail before
+      // the type-dispatch below tries to interpret the envelope as a
+      // SLAM payload.
+      if (msg?.type === '__log__') return;
       if (msg.type === 'ready') {
         this.workerReady = true;
-        console.log('[slam] Worker ready');
+        log.ui.info('[slam] Worker ready');
       } else if (msg.type === 'newMap') {
         const { output, directOutput } = msg.data as {
           output: Float32Array;
@@ -881,7 +885,7 @@ export class MappingPage {
         this.publish(currentTopic, payload);
         const preview = typeof payload === 'string' ? payload : JSON.stringify(payload);
         this.addLog(`> ${currentTopic}: ${preview.slice(0, 120)}`);
-        console.log('[slam] Manual send:', currentTopic, payload);
+        log.ui.info('[slam] Manual send:', currentTopic, payload);
       });
       body.appendChild(sendBtn);
     }));
@@ -894,22 +898,7 @@ export class MappingPage {
       topicHint.className = 'mapping-cmd-hint mapping-log-topic';
       topicHint.textContent = `← ${RTC_TOPIC.USLAM_SERVER_LOG}`;
       header.appendChild(topicHint);
-      const copyBtn = document.createElement('button');
-      copyBtn.className = 'mapping-log-copy';
-      copyBtn.textContent = 'Copy';
-      copyBtn.addEventListener('click', async () => {
-        const text = this.logEl?.innerText ?? '';
-        try {
-          await navigator.clipboard.writeText(text);
-          const prev = copyBtn.textContent;
-          copyBtn.textContent = 'Copied';
-          setTimeout(() => { copyBtn.textContent = prev; }, 1200);
-        } catch {
-          copyBtn.textContent = 'Failed';
-          setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1200);
-        }
-      });
-      header.appendChild(copyBtn);
+      header.appendChild(makeCopyButton(() => this.logEl?.innerText ?? ''));
       body.appendChild(header);
 
       this.logEl = document.createElement('div');
@@ -983,7 +972,7 @@ export class MappingPage {
   // ── Commands ──
 
   private sendCmd(cmd: string): void {
-    console.log(`[slam] Sending: ${cmd}`);
+    log.ui.info(`[slam] Sending: ${cmd}`);
     this.publish(RTC_TOPIC.USLAM_CMD, cmd);
   }
 
@@ -1009,7 +998,7 @@ export class MappingPage {
         break;
 
       case 'goal':
-        console.log(`[slam] Goal pose: x=${x.toFixed(3)} y=${y.toFixed(3)} yaw=${yaw.toFixed(3)} (${yawDeg}°)`);
+        log.ui.info(`[slam] Goal pose: x=${x.toFixed(3)} y=${y.toFixed(3)} yaw=${yaw.toFixed(3)} (${yawDeg}°)`);
         // Setting a goal on a stopped nav module just registers the target —
         // the robot won't move until navigation/start is issued. Auto-start
         // here so dragging a goal "just works", regardless of whether nav was
@@ -1028,7 +1017,7 @@ export class MappingPage {
         break;
 
       case 'patrol':
-        console.log(`[slam] Patrol waypoint ${this.patrolCount + 1}: x=${x.toFixed(3)} y=${y.toFixed(3)} yaw=${yaw.toFixed(3)} (${yawDeg}°)`);
+        log.ui.info(`[slam] Patrol waypoint ${this.patrolCount + 1}: x=${x.toFixed(3)} y=${y.toFixed(3)} yaw=${yaw.toFixed(3)} (${yawDeg}°)`);
         this.patrolPoints.push({ x, y, yaw });
         this.slamScene?.addPatrolMarker(x, y, yaw, this.patrolCount);
         this.patrolCount++;
@@ -1680,7 +1669,7 @@ export class MappingPage {
 
   handleTopicMessage(topic: string, data: unknown): void {
     if (this.topicLogCount < 30) {
-      console.log('[slam] Topic:', topic, 'data type:', typeof data, data instanceof ArrayBuffer ? `AB(${data.byteLength})` : '');
+      log.ui.info('[slam] Topic:', topic, 'data type:', typeof data, data instanceof ArrayBuffer ? `AB(${data.byteLength})` : '');
       this.topicLogCount++;
     }
     switch (topic) {
@@ -1711,7 +1700,7 @@ export class MappingPage {
   private handleServerLog(data: unknown): void {
     const msg = typeof data === 'string' ? data : JSON.stringify(data);
     this.addLog(msg);
-    console.log('[slam] Server log:', msg);
+    log.ui.info('[slam] Server log:', msg);
 
     // ── Map state transitions ──
     if (msg.includes('mapping/stop/success')) {
@@ -2153,7 +2142,7 @@ export class MappingPage {
   }
 
   private handleCloudMap(data: unknown): void {
-    console.log('[slam] Cloud map received, type:', typeof data,
+    log.ui.info('[slam] Cloud map received, type:', typeof data,
       data instanceof ArrayBuffer ? `ArrayBuffer(${data.byteLength})` : '');
 
     // PCD data may arrive as binary ArrayBuffer or nested in data.data

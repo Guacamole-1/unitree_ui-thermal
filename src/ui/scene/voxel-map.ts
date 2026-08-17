@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { log, pipeWorkerLogs } from '../logger';
 
 interface VoxelGeometryData {
   point_count: number;
@@ -45,18 +46,23 @@ export class VoxelMap {
         new URL('../../workers/voxel-worker.ts', import.meta.url),
         { type: 'module' },
       );
+      pipeWorkerLogs(this.worker, 'scene');
 
       this.worker.onmessage = (e: MessageEvent<VoxelWorkerResult>) => {
+        // pipeWorkerLogs uses addEventListener, but .onmessage still
+        // fires for every message — skip log frames so applyGeometry
+        // doesn't try to interpret them as a geometry payload.
+        if ((e.data as unknown as { type?: string } | undefined)?.type === '__log__') return;
         this.applyGeometry(e.data);
       };
 
       this.worker.onerror = (err) => {
-        console.error('[go2:voxel] Worker error:', err);
+        log.scene.error('[go2:voxel] Worker error:', err);
       };
 
-      console.log('[go2:voxel] Worker initialized');
+      log.scene.info('[go2:voxel] Worker initialized');
     } catch (err) {
-      console.error('[go2:voxel] Failed to create worker:', err);
+      log.scene.error('[go2:voxel] Failed to create worker:', err);
     }
   }
 

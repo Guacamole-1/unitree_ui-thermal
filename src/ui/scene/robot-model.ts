@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { log } from '../logger';
 
 interface Joint {
   bone: THREE.Bone;
@@ -68,9 +69,9 @@ export class RobotModel {
       this.parent.add(this.model);
       this.buildJointMap(gltf);
       this.startRadarSpin();
-      console.log('[go2:3d] Model loaded, joints:', Array.from(this.joints.keys()));
+      log.scene.info('[go2:3d] Model loaded, joints:', Array.from(this.joints.keys()));
     } catch (err) {
-      console.error('[go2:3d] Failed to load Go2 model:', err);
+      log.scene.error('[go2:3d] Failed to load Go2 model:', err);
     }
   }
 
@@ -216,6 +217,14 @@ export class RobotModel {
 
   getPosition(): THREE.Vector3 {
     return this.model?.position.clone() ?? new THREE.Vector3(0, 0, 0);
+  }
+
+  /** Current model orientation as a quaternion. Used by the follow-cam
+   *  to keep the camera anchored behind the dog's heading regardless of
+   *  which way the robot is facing. Returns identity until the GLB
+   *  finishes loading. */
+  getQuaternion(): THREE.Quaternion {
+    return this.model?.quaternion.clone() ?? new THREE.Quaternion();
   }
 
   destroy(): void {

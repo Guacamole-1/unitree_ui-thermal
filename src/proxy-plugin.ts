@@ -4,14 +4,51 @@ import https from 'node:https';
 import dgram from 'node:dgram';
 
 // ── UDP Multicast Scanner (embedded) ──
+//
+// Wire protocol — same on Go2 and G1, only the multicast group(s) differ:
+//   * Send query to QUERY_PORT (10131): {"name":"unitree_dapengche"[,"sn":"..."]}
+//   * Receive response on RECV_PORT (10134): {sn, ip, ...}
+//
+// Multicast groups per family:
+//   * Go2: 231.1.1.1                       (server/scanner.mjs original)
+//   * G1:  231.1.1.2 + 239.255.1.1         (multicast_responder.py on the
+//                                          robot at /unitree/.../webrtc_dds_bridge/)
+//
+// G1 firmware ≥ 1.5.1 added an SN filter to multicast_responder.py: the
+// robot drops queries whose `sn` field doesn't match its own. To reach
+// those robots, callers must pass `sn` here so it gets embedded in the
+// outgoing payload. Queries without `sn` still work on Go2 and G1<1.5.1.
 
-const MULTICAST_GROUP = '231.1.1.1';
 const QUERY_PORT = 10131;
 const RECV_PORT = 10134;
-const QUERY_MSG = JSON.stringify({ name: 'unitree_dapengche' });
 const DEFAULT_SCAN_TIMEOUT = 3000;
 
-function scanForRobots(timeoutMs = DEFAULT_SCAN_TIMEOUT): Promise<Array<{ sn: string; ip: string }>> {
+const FAMILY_GROUPS: Record<string, string[]> = {
+  Go2: ['231.1.1.1'],
+  G1:  ['231.1.1.2', '239.255.1.1'],
+};
+
+function groupsForFamily(family: string): string[] {
+  return FAMILY_GROUPS[family] || FAMILY_GROUPS.Go2;
+}
+
+// Best-effort family inference from the 16-char SN. Unitree SNs:
+//   Go2: starts with B (e.g. B42D2000OBIB1F)
+//   G1:  starts with E (e.g. E21D6000PBF9ELG5)
+// Returns null when we can't tell — those replies are let through so a new
+// SN format doesn't silently break discovery.
+function inferFamilyFromSn(sn: string): 'Go2' | 'G1' | null {
+  const c = sn?.[0]?.toUpperCase();
+  if (c === 'B') return 'Go2';
+  if (c === 'E') return 'G1';
+  return null;
+}
+
+function scanForRobots(family: string, timeoutMs = DEFAULT_SCAN_TIMEOUT, sn?: string): Promise<Array<{ sn: string; ip: string }>> {
+  const groups = groupsForFamily(family);
+  const queryPayload = sn
+    ? JSON.stringify({ name: 'unitree_dapengche', sn })
+    : JSON.stringify({ name: 'unitree_dapengche' });
   return new Promise((resolve, reject) => {
     const results: Array<{ sn: string; ip: string }> = [];
     const seen = new Set<string>();
@@ -27,32 +64,51 @@ function scanForRobots(timeoutMs = DEFAULT_SCAN_TIMEOUT): Promise<Array<{ sn: st
       try {
         const data = JSON.parse(msg.toString());
         if (data.sn && data.ip && !seen.has(data.sn)) {
+          // SN filter: when targeting a specific robot, drop replies from
+          // anyone else (the multicast group can be shared with other
+          // robots on the same LAN that respond to broadcast queries).
+          if (sn && data.sn !== sn) return;
+          // Family filter: port 10134 is shared, so a Go2 announcement can
+          // arrive on a G1 scan (and vice versa). Drop replies whose SN
+          // prefix doesn't match the requested family.
+          const inferred = inferFamilyFromSn(data.sn);
+          if (inferred && inferred !== family) {
+            console.log(`[scanner] Dropping cross-family reply: requested=${family} sn=${data.sn} (looks like ${inferred})`);
+            return;
+          }
           seen.add(data.sn);
           results.push({ sn: data.sn, ip: data.ip });
-          console.log(`[scanner] Found robot: SN=${data.sn} IP=${data.ip}`);
+          console.log(`[scanner] Found ${family} robot: SN=${data.sn} IP=${data.ip}`);
         }
       } catch { /* ignore non-JSON */ }
     });
 
     receiver.bind(RECV_PORT, () => {
-      try { receiver.addMembership(MULTICAST_GROUP); } catch { /* may already be member */ }
+      for (const g of groups) {
+        try { receiver.addMembership(g); } catch { /* may already be member */ }
+      }
 
       const sender = dgram.createSocket({ type: 'udp4', reuseAddr: true });
-      const buf = Buffer.from(QUERY_MSG);
+      const buf = Buffer.from(queryPayload);
       let sent = 0;
-      const sendQuery = () => {
-        sender.send(buf, 0, buf.length, QUERY_PORT, MULTICAST_GROUP, (err) => {
-          if (err) console.warn('[scanner] Send error:', err.message);
-          sent++;
-          if (sent < 3) setTimeout(sendQuery, 200);
-          else sender.close();
-        });
+      const sendQuery = (): void => {
+        // Query every group in the family in parallel each iteration.
+        for (const g of groups) {
+          sender.send(buf, 0, buf.length, QUERY_PORT, g, (err) => {
+            if (err) console.warn(`[scanner] Send error to ${g}:`, err.message);
+          });
+        }
+        sent++;
+        if (sent < 3) setTimeout(sendQuery, 200);
+        else setTimeout(() => sender.close(), 100);
       };
       sendQuery();
     });
 
     setTimeout(() => {
-      try { receiver.dropMembership(MULTICAST_GROUP); } catch {}
+      for (const g of groups) {
+        try { receiver.dropMembership(g); } catch { /* not a member */ }
+      }
       receiver.close();
       resolve(results);
     }, timeoutMs);
@@ -65,15 +121,37 @@ export function robotProxyPlugin(): Plugin {
   return {
     name: 'robot-proxy',
     configureServer(server) {
+      const defaultPrintUrls = server.printUrls.bind(server);
+
+      server.printUrls = () => {
+        const urls = server.resolvedUrls;
+        if (!urls) {
+          defaultPrintUrls();
+          return;
+        }
+
+        for (const url of urls.local) {
+          server.config.logger.info(`  ->  Local:   ${url}`);
+        }
+        for (const url of urls.network) {
+          server.config.logger.info(`  ->  Network: ${url}`);
+        }
+        if (urls.network.length === 0) {
+          server.config.logger.info('  ->  Network: run `npm run dev:host` to expose on your LAN');
+        }
+      };
+
       // Handle /scan requests directly (no separate scanner process needed)
       server.middlewares.use((req, res, next) => {
         const url = new URL(req.url || '/', 'http://localhost');
 
         if (url.pathname === '/scan' && req.method === 'GET') {
           const timeout = parseInt(url.searchParams.get('timeout') || String(DEFAULT_SCAN_TIMEOUT), 10);
-          console.log(`[scanner] Scan requested (timeout=${timeout}ms)`);
+          const family = url.searchParams.get('family') || 'Go2';
+          const sn = url.searchParams.get('sn') || undefined;
+          console.log(`[scanner] Scan requested (family=${family}, timeout=${timeout}ms${sn ? `, sn=${sn}` : ''})`);
 
-          scanForRobots(timeout)
+          scanForRobots(family, timeout, sn)
             .then((robots) => {
               res.setHeader('Content-Type', 'application/json');
               res.end(JSON.stringify({ robots }));
@@ -140,6 +218,16 @@ export function robotProxyPlugin(): Plugin {
               headers['content-length'] = body.length.toString();
             }
 
+            // Region selector: client sends `X-Unitree-Region: cn` to hit the
+            // mainland-China endpoint, anything else (or absent) defaults to
+            // the global endpoint. The header is consumed by the proxy and
+            // stripped before forwarding upstream.
+            const region = (headers['x-unitree-region'] || '').toLowerCase();
+            const hostname = region === 'cn'
+              ? 'robot-api.unitree.com'
+              : 'global-robot-api.unitree.com';
+            delete headers['x-unitree-region'];
+
             // Set User-Agent to match Android app (EdgeOne WAF blocks Node defaults)
             headers['user-agent'] = 'okhttp/4.11.0';
             // Ask for identity encoding — we don't want the server to gzip/deflate
@@ -147,17 +235,21 @@ export function robotProxyPlugin(): Plugin {
             // the proper Content-Encoding header, which makes the browser parse
             // them as binary JSON. Forcing identity avoids the ambiguity.
             headers['accept-encoding'] = 'identity';
-            // Remove headers that leak browser/proxy origin
+            // Remove headers that leak browser/proxy origin or bloat the request
             delete headers['sec-fetch-site'];
             delete headers['sec-fetch-mode'];
             delete headers['sec-fetch-dest'];
             delete headers['sec-ch-ua'];
             delete headers['sec-ch-ua-mobile'];
             delete headers['sec-ch-ua-platform'];
+            // Never forward browser cookies — they are unrelated to the upstream
+            // API (which uses the Token header for auth) and can cause nginx to
+            // reject the request with "400 Request Header Or Cookie Too Large".
+            delete headers['cookie'];
 
             const proxyReq = https.request(
               {
-                hostname: 'global-robot-api.unitree.com',
+                hostname,
                 port: 443,
                 path: targetPath,
                 method: req.method,

@@ -1,10 +1,11 @@
 {
-  "name": "unitree-go2-ui",
+  "name": "unitree-ui",
   "private": true,
   "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:host": "vite --host",
     "start": "bash start.sh",
     "start:no-ble": "bash start.sh --no-ble",
     "ble-server": "python3 server/ble_server.py",

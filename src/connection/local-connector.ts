@@ -1,8 +1,22 @@
 import type { ConNotifyResponse, ConnectionCallbacks, SdpPayload } from '../types';
-import { aesEncrypt, aesDecrypt, aesGcmDecrypt, generateAesKey } from '../crypto/aes';
+import { aesEncrypt, aesDecrypt, aesGcmDecrypt, generateAesKey, hexToBytes } from '../crypto/aes';
 import { loadPublicKey, rsaEncrypt } from '../crypto/rsa';
 import { LOCAL_PORT, LOCAL_OFFER_PORT } from './modes';
 import { WebRTCConnection } from './webrtc';
+import { cloudApi } from '../api/unitree-cloud';
+import { getCachedAesKey, setCachedAesKey, clearCachedAesKey } from '../api/aes-key-derive';
+import { log } from '../ui/logger';
+
+// Log prefix follows the active family at call time so a Go2 vs G1
+// connection attempt is distinguishable in DevTools.
+const tag = (): string => `[${cloudApi.connectFamily.toLowerCase()}]`;
+
+export interface AesKeyPromptOptions {
+  /** True when the previous key (cached or just-entered) failed to decrypt
+   *  the con_notify payload — the modal should surface that to the user. */
+  previousKeyFailed?: boolean;
+}
+export type AesKeyPrompter = (sn: string, opts?: AesKeyPromptOptions) => Promise<string>;
 
 function proxyUrl(path: string): string {
   return `/robot-api${path}`;
@@ -26,9 +40,51 @@ function extractPathEnding(data1: string): string {
   return path;
 }
 
-async function decryptData1(resp: ConNotifyResponse): Promise<string> {
+async function decryptData1(
+  resp: ConNotifyResponse,
+  sn: string,
+  promptKey?: AesKeyPrompter,
+  onStep?: (msg: string) => void,
+): Promise<string> {
   if (resp.data2 === 2) {
     return await aesGcmDecrypt(resp.data1);
+  }
+  if (resp.data2 === 3) {
+    // Per-device AES-128 key required (G1 ≥ 1.5.1). Pull from cache first;
+    // if missing or wrong, prompt and retry. We give the user up to 3
+    // attempts before bubbling up the failure — a wrong key flushes the
+    // cache so the next visit doesn't auto-load the bad value.
+    const MAX_ATTEMPTS = 3;
+    let lastErr: Error | null = null;
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      const fromCache = attempt === 0 && sn ? getCachedAesKey(sn) : null;
+      let aesHex = fromCache;
+      if (!aesHex) {
+        if (!promptKey) {
+          throw new Error('data2=3 needs an AES-128 key. Open Account → device tile → "AES Key" to derive one for this SN.');
+        }
+        aesHex = (await promptKey(sn, { previousKeyFailed: lastErr !== null })).trim();
+        if (!aesHex) throw new Error('AES-128 key required to decrypt con_notify');
+        if (sn) setCachedAesKey(sn, aesHex);
+        const note = lastErr ? 'AES-128 key (prompted again, previous key failed)' : 'AES-128 key (prompted)';
+        log.webrtc.info(`${tag()} ${note} for SN ${sn || '<unknown>'} — cached for next time, key=${aesHex}`);
+        onStep?.(`${note} — cached for SN ${sn || '<unknown>'}`);
+      } else {
+        log.webrtc.info(`${tag()} AES-128 key loaded from localStorage cache for SN ${sn}, key=${aesHex}`);
+        onStep?.(`AES-128 key from localStorage cache (SN ${sn})`);
+      }
+      try {
+        return await aesGcmDecrypt(resp.data1, hexToBytes(aesHex));
+      } catch (err) {
+        lastErr = err instanceof Error ? err : new Error(String(err));
+        log.webrtc.warn(`${tag()} AES-128 decrypt failed for SN ${sn || '<unknown>'} (${lastErr.message}) — flushing cached key, will reprompt`);
+        // The key (cached or just-entered) is wrong — flush it so a
+        // fresh attempt can collect a different one. Loop will reprompt
+        // unless we've exhausted attempts.
+        if (sn) clearCachedAesKey(sn);
+      }
+    }
+    throw lastErr ?? new Error('AES-128 decrypt failed after retries');
   }
   return resp.data1;
 }
@@ -42,7 +98,7 @@ async function detectPort(ip: string): Promise<'new' | 'old'> {
       signal: AbortSignal.timeout(3000),
     });
     if (resp.ok) {
-      console.log(`[go2] Port ${LOCAL_PORT} available (new method)`);
+      log.webrtc.info(`${tag()} Port ${LOCAL_PORT} available (new method)`);
       return 'new';
     }
   } catch { /* port not available */ }
@@ -55,7 +111,7 @@ async function detectPort(ip: string): Promise<'new' | 'old'> {
     });
     // Even a 404 means the port is reachable
     if (resp.status !== 502) {
-      console.log(`[go2] Port ${LOCAL_OFFER_PORT} available (old method)`);
+      log.webrtc.info(`${tag()} Port ${LOCAL_OFFER_PORT} available (old method)`);
       return 'old';
     }
   } catch { /* port not available */ }
@@ -68,17 +124,18 @@ export async function connectLocal(
   mode: 'AP' | 'STA-L',
   callbacks: ConnectionCallbacks,
   onStep?: (msg: string) => void,
+  opts: { sn?: string; promptKey?: AesKeyPrompter } = {},
 ): Promise<WebRTCConnection> {
-  console.log(`[go2] Connecting to ${ip} in ${mode} mode...`);
+  log.webrtc.info(`${tag()} Connecting to ${ip} in ${mode} mode...`);
 
   onStep?.(`Detecting robot at ${ip}...`);
   const method = await detectPort(ip);
-  console.log(`[go2] Using ${method} method`);
+  log.webrtc.info(`${tag()} Using ${method} method`);
 
   onStep?.('Creating WebRTC offer...');
   const webrtc = new WebRTCConnection(callbacks);
   const sdpString = await webrtc.createOffer();
-  console.log(`[go2] Created WebRTC offer (${sdpString.length} bytes)`);
+  log.webrtc.info(`${tag()} Created WebRTC offer (${sdpString.length} bytes)`);
 
   const id = mode === 'AP' ? 'abcd' : 'STA_localNetwork';
   const sdpPayload: SdpPayload = {
@@ -93,7 +150,7 @@ export async function connectLocal(
 
     onStep?.('Exchanging SDP with robot...');
     if (method === 'new') {
-      answerSdp = await exchangeSdpNew(ip, sdpPayload);
+      answerSdp = await exchangeSdpNew(ip, sdpPayload, opts.sn ?? '', opts.promptKey, onStep);
     } else {
       answerSdp = await exchangeSdpOld(ip, sdpPayload);
     }
@@ -103,12 +160,17 @@ export async function connectLocal(
       throw new Error('Device rejected connection — another client may be connected');
     }
 
-    console.log(`[go2] Received answer SDP (${answerSdp.length} bytes)`);
-    console.log(`[go2] Answer SDP starts with: ${answerSdp.slice(0, 80)}...`);
+    log.webrtc.info(`${tag()} Received answer SDP (${answerSdp.length} bytes)`);
+    // Concise media summary (which m-lines the robot negotiated + direction) —
+    // enough to spot a missing/odd audio or video line without dumping the SDP.
+    const mediaLines = answerSdp.split('\n')
+      .map(l => l.trim())
+      .filter(l => /^m=(audio|video)|^a=(sendrecv|sendonly|recvonly|inactive)$/.test(l));
+    log.webrtc.debug(`${tag()} media:`, mediaLines.join(' | ') || '(none)');
 
     onStep?.('Setting remote description...');
     await webrtc.setAnswer(answerSdp);
-    console.log(`[go2] Remote description set, waiting for connection...`);
+    log.webrtc.info(`${tag()} Remote description set, waiting for connection...`);
 
     return webrtc;
   } catch (err) {
@@ -117,11 +179,17 @@ export async function connectLocal(
   }
 }
 
-async function exchangeSdpNew(ip: string, payload: SdpPayload): Promise<string> {
+async function exchangeSdpNew(
+  ip: string,
+  payload: SdpPayload,
+  sn: string,
+  promptKey?: AesKeyPrompter,
+  onStep?: (msg: string) => void,
+): Promise<string> {
   const host = `${ip}:${LOCAL_PORT}`;
 
   // Step 1: con_notify — get public key
-  console.log(`[go2] Sending con_notify to ${host}...`);
+  log.webrtc.info(`${tag()} Sending con_notify to ${host}...`);
   const notifyResp = await fetch(proxyUrl('/con_notify'), {
     method: 'POST',
     headers: proxyHeaders(host),
@@ -133,11 +201,10 @@ async function exchangeSdpNew(ip: string, payload: SdpPayload): Promise<string> 
 
   const notifyB64 = await notifyResp.text();
   const notifyJson: ConNotifyResponse = JSON.parse(atob(notifyB64));
-  console.log(`[go2] con_notify response: data2=${notifyJson.data2}, data1 length=${notifyJson.data1.length}`);
+  log.webrtc.info(`${tag()} con_notify response: data2=${notifyJson.data2}, data1 length=${notifyJson.data1.length}`);
 
-  // Decrypt data1 if encrypted (data2 === 2)
-  const data1 = await decryptData1(notifyJson);
-  console.log(`[go2] Decrypted data1 length: ${data1.length}`);
+  const data1 = await decryptData1(notifyJson, sn, promptKey, onStep);
+  log.webrtc.info(`${tag()} Decrypted data1 length: ${data1.length}`);
 
   // Extract public key (strip 10-char padding each end)
   const pubKeyB64 = data1.slice(10, data1.length - 10);
@@ -145,11 +212,11 @@ async function exchangeSdpNew(ip: string, payload: SdpPayload): Promise<string> 
 
   // Compute path ending from decrypted data1
   const pathEnding = extractPathEnding(data1);
-  console.log(`[go2] Path ending: ${pathEnding}`);
+  log.webrtc.info(`${tag()} Path ending: ${pathEnding}`);
 
   // Step 2: con_ing — encrypted SDP exchange
   const aesKey = generateAesKey();
-  console.log(`[go2] AES key: ${aesKey}`);
+  log.webrtc.info(`${tag()} AES key: ${aesKey}`);
 
   const encryptedSdp = await aesEncrypt(JSON.stringify(payload), aesKey);
   const encryptedKey = rsaEncrypt(aesKey, publicKey);
@@ -159,7 +226,7 @@ async function exchangeSdpNew(ip: string, payload: SdpPayload): Promise<string> 
     data2: encryptedKey,
   });
 
-  console.log(`[go2] Sending con_ing_${pathEnding} (body: ${body.length} bytes)...`);
+  log.webrtc.info(`${tag()} Sending con_ing_${pathEnding} (body: ${body.length} bytes)...`);
   const ingResp = await fetch(proxyUrl(`/con_ing_${pathEnding}`), {
     method: 'POST',
     headers: proxyHeaders(host, 'application/x-www-form-urlencoded'),
@@ -172,10 +239,10 @@ async function exchangeSdpNew(ip: string, payload: SdpPayload): Promise<string> 
   }
 
   const encryptedAnswer = await ingResp.text();
-  console.log(`[go2] con_ing response length: ${encryptedAnswer.length}`);
+  log.webrtc.info(`${tag()} con_ing response length: ${encryptedAnswer.length}`);
 
   const decryptedAnswer = await aesDecrypt(encryptedAnswer, aesKey);
-  console.log(`[go2] Decrypted answer: ${decryptedAnswer.slice(0, 100)}...`);
+  log.webrtc.info(`${tag()} Decrypted answer: ${decryptedAnswer.slice(0, 100)}...`);
 
   const answerJson = JSON.parse(decryptedAnswer);
   return answerJson.sdp;
@@ -184,7 +251,7 @@ async function exchangeSdpNew(ip: string, payload: SdpPayload): Promise<string> 
 async function exchangeSdpOld(ip: string, payload: SdpPayload): Promise<string> {
   const host = `${ip}:${LOCAL_OFFER_PORT}`;
 
-  console.log(`[go2] Sending SDP to ${host}/offer...`);
+  log.webrtc.info(`${tag()} Sending SDP to ${host}/offer...`);
   const resp = await fetch(proxyUrl('/offer'), {
     method: 'POST',
     headers: proxyHeaders(host, 'application/json'),
@@ -196,6 +263,6 @@ async function exchangeSdpOld(ip: string, payload: SdpPayload): Promise<string> 
   }
 
   const answer = await resp.json();
-  console.log(`[go2] Received answer from old endpoint`);
+  log.webrtc.info(`${tag()} Received answer from old endpoint`);
   return answer.sdp;
 }

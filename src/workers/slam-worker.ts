@@ -12,6 +12,8 @@
  *   Import: a.a = emscripten_resize_heap (1 import only)
  */
 
+import { workerLog } from './worker-logger';
+
 const MAX_POINTS = 1_000_000;
 
 interface SlamExports {
@@ -121,10 +123,10 @@ let processor: SlamProcessor | null = null;
 
 loadWasm().then((p) => {
   processor = p;
-  console.log('[slam-worker] WASM loaded, processor ready');
+  workerLog.info('[slam-worker] WASM loaded, processor ready');
   self.postMessage({ type: 'ready' });
 }).catch((err) => {
-  console.error('[slam-worker] WASM load failed:', err);
+  workerLog.error('[slam-worker] WASM load failed:', err);
 });
 
 self.addEventListener('message', (e: MessageEvent) => {

@@ -4,6 +4,8 @@
  * Output: { geometryData: { point_count, face_count, positions, uvs, indices }, resolution, origin }
  */
 
+import { workerLog } from './worker-logger';
+
 interface WasmModule {
   _generate: (...args: number[]) => void;
   _malloc: (size: number) => number;
@@ -137,9 +139,9 @@ async function initWasm(): Promise<void> {
     };
 
     decompressor = new VoxelDecompressor(mod, 80000);
-    console.log('[go2:voxel-worker] WASM loaded, decompressor ready');
+    workerLog.info('[go2:voxel-worker] WASM loaded, decompressor ready');
   } catch (err) {
-    console.error('[go2:voxel-worker] Failed to load WASM:', err);
+    workerLog.error('[go2:voxel-worker] Failed to load WASM:', err);
   }
 }
 
