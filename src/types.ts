@@ -7,6 +7,7 @@ export interface ConnectionConfig {
   serialNumber: string;
   email: string;
   password: string;
+  thermal: boolean;
 }
 
 export interface TurnServerInfo {

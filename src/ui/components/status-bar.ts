@@ -4,6 +4,8 @@ import type { ErrorStore } from '../../protocol/error-store';
 import { ErrorsBadge } from './errors-badge';
 import { AudioPtt } from './audio-ptt';
 import { AudioMonitor } from './audio-monitor';
+import { GimbalBtn } from './gimbal';
+import { ThermalBtn } from './thermal-cam';
 
 const SUN_SVG = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#FFB74D" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
   <circle cx="12" cy="12" r="4"/>
@@ -35,6 +37,15 @@ const SETTINGS_SVG = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none
   <line x1="17" y1="16" x2="23" y2="16"/>
 </svg>`;
 
+// svg for the speed button to control the robot speed (todo)
+const SPEED_SVG = (color: string) => `<svg width="25" height="25" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+<path d="M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z"/>
+<path d="M12 12L16 8"/>
+<path d="M12 4v1.5"/><path d="M12 18.5V20"/>
+<path d="M4 12h1.5"/><path d="M18.5 12H20"/>
+</svg>`;
+// svg to activate the gimbal control
+
 export interface NavBarOptions {
   /** Click handler for the settings icon. When provided, the icon is
    *  rendered as the rightmost item in the navbar (control view: opens
@@ -44,6 +55,13 @@ export interface NavBarOptions {
   onPttEnd?: () => void;
   onAudioMonitorStart?: () => void;
   onAudioMonitorStop?: () => void;
+  useThermal?: boolean;
+  onGimbalStart?: () => void;
+  onGimbalMove?: () => void;
+  onThermalStart?: () => void;
+  onGimbalStop?: () => void;
+  onThermalStop?: () => void;
+
 }
 
 export class NavBar {
@@ -64,6 +82,8 @@ export class NavBar {
   private onBack: () => void;
   private errorsBadge: ErrorsBadge | null = null;
   private options: NavBarOptions;
+  private gimbalBtn: GimbalBtn | null = null;
+  private thermalBtn: ThermalBtn | null = null;
 
   constructor(
     parent: HTMLElement,
@@ -136,6 +156,15 @@ export class NavBar {
       });
       rightSlot.appendChild(this.audioPtt.element);
     }
+	// gimbal control
+	if(this.options.useThermal){
+	  this.gimbalBtn = new GimbalBtn(this.options.onGimbalMove!);
+	  rightSlot.appendChild(this.gimbalBtn.element);
+
+	  this.thermalBtn = new ThermalBtn(this.options.onThermalStart);
+	  rightSlot.appendChild(this.thermalBtn.element);
+	}
+
 
     if (this.options.onMenuClick) {
       this.menuIconWrap = document.createElement('button');

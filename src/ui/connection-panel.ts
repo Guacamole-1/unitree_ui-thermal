@@ -18,6 +18,8 @@ export class ConnectionPanel {
   private ipInput!: HTMLInputElement;
   private connectBtn!: HTMLButtonElement;
   private scanBtn!: HTMLButtonElement;
+  private thermalCheckBox!: HTMLInputElement;
+  private thermalLabel!: HTMLInputElement;
   private scanSnInput!: HTMLInputElement;
   private statusEl!: HTMLElement;
   private robotPickerGroup!: HTMLElement;
@@ -93,6 +95,11 @@ export class ConnectionPanel {
         <label>Choose Robot</label>
         <select id="robot-select"><option value="">-- Select robot --</option></select>
       </div>
+	  <label id="thermal-label">
+		<input type="checkbox" id="thermal-checkbox" name="therm" checked />
+		<span>Connect to thermal camera</span>
+		<br><br>
+	  </label>
       <button id="connect-btn" class="btn-connect">Connect</button>
       <div id="connection-status" class="status"></div>
     `;
@@ -102,6 +109,8 @@ export class ConnectionPanel {
     this.connectBtn = this.container.querySelector('#connect-btn')!;
     this.scanBtn = this.container.querySelector('#scan-btn')!;
     this.scanSnInput = this.container.querySelector('#scan-sn-input')!;
+	this.thermalCheckBox = this.container.querySelector('#thermal-checkbox')!;
+	this.thermalLabel = this.container.querySelector('#thermal-label')!;
     this.scanSnInput.addEventListener('input', () => {
       // Persist last SN per family so reopening Connect remembers it.
       const fam = cloudApi.connectFamily;
@@ -193,6 +202,18 @@ export class ConnectionPanel {
     const isRemote = mode === 'STA-T';
     const ipGroup = this.container.querySelector('#ip-group') as HTMLElement;
 
+	// Thermal checkbox only available for Go2 at STA-L (current network) for now
+	if(cloudApi.connectFamily === "Go2"){
+	  this.thermalLabel.style.display = '';
+		if (mode === 'STA-L' ){
+		  this.thermalCheckBox.disabled = false;
+		}else {
+		  this.thermalCheckBox.disabled = true;
+		  this.thermalCheckBox.checked = false;
+		}
+	} else {
+	  this.thermalLabel.style.display = 'none';
+	}
     // Remote option label flips based on auth state. The <option> stays
     // selectable so users can see the entry, but the change handler bounces
     // the selection back to STA-L when they're logged out.
@@ -282,6 +303,7 @@ export class ConnectionPanel {
 
   private handleConnect(): void {
     const mode = this.modeSelect.value as ConnectionMode;
+	const useThermal = this.thermalCheckBox.checked;
 
     if (mode === 'STA-T') {
       if (!cloudApi.isLoggedIn) {
@@ -300,6 +322,7 @@ export class ConnectionPanel {
         serialNumber: sn,
         email: '',
         password: '',
+		thermal: useThermal,
       });
     } else {
       const ip = this.ipInput.value.trim();
@@ -323,6 +346,7 @@ export class ConnectionPanel {
         serialNumber: sn,
         email: '',
         password: '',
+		thermal: useThermal,
       });
     }
   }

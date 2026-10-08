@@ -37,6 +37,22 @@ import { AudioRecorder, convertFileToWav } from './audio-recorder';
 import type { WebRTCConnection } from '../connection/webrtc';
 import type { Scene3D } from './scene/scene';
 
+// thermal imports
+import { ThermalWebRTCConnection } from '../connection/thermal_webrtc';
+import { PipThermal } from './components/pip-thermal';
+import {GimbalClient} from '../connection/gimbal'
+
+/*
+	SHIT TO TEST:
+		- thermal camera and gimbal connection on main screen
+	SHIT TO DO:
+		- gimbal check connection and reconnect (to be done on client)
+		- thermal pallettes
+		- create a separate gimbal func
+		- make gimbal and thermal btns work
+
+ */
+
 type Screen = 'landing' | 'connection' | 'hub' | 'control' | 'status' | 'services' | 'settings' | 'app-settings' | 'mapping' | 'account' | 'bt' | 'errors' | 'teaching';
 
 /** Translate raw connector errors into user-facing messages. The G1
@@ -81,6 +97,10 @@ export class App {
   private dataHandler: DataChannelHandler | null = null;
   private videoStream: MediaStream | null = null;
   private connectionConfig: ConnectionConfig | null = null;
+  // thermal and gimbal
+  private thermalStream: MediaStream | null = null;
+	private thermalwebrtc: ThermalWebRTCConnection | null = null;
+  private gimbalClient: GimbalClient | null = null;
 
   // Control UI components
   private navBar: NavBar | null = null;
@@ -88,6 +108,9 @@ export class App {
   private controlUi: HTMLElement | null = null;
   private actionBar: ActionBar | null = null;
   private scene3d: Scene3D | null = null;
+  // thermal UI components
+  private pipThermal: PipThermal | null = null;
+  private useThermalCam: boolean = false;
   // Control-view chrome: the settings icon in the navbar opens this
   // drawer, which also hosts BT-remote / gamepad selection (replaces
   // the old SettingBar and the standalone input-source picker).
@@ -294,7 +317,8 @@ export class App {
     });
     window.addEventListener('beforeunload', () => this.gamepadManager?.destroy());
 
-    this.showLandingScreen();
+    //this.showLandingScreen();
+	this.showControlUi();
   }
 
   // ── Screen Navigation ──
@@ -536,7 +560,6 @@ export class App {
     this.root.appendChild(this.controlUi);
 
     this.init3DScene();
-
     // Nav bar (top) — back goes to hub. The settings icon at the right
     // opens the in-control settings drawer, which is now the sole entry
     // point for BT-remote / gamepad selection (replaces the old passive
@@ -549,14 +572,21 @@ export class App {
     const audioNavCallbacks = isG1Family(cloudApi.connectFamily)
       ? {}
       : {
-          onPttStart: () => this.onPttStart(),
-          onPttEnd: () => this.onPttEnd(),
-          onAudioMonitorStart: () => this.onAudioMonitorStart(),
-          onAudioMonitorStop: () => this.onAudioMonitorStop(),
-        };
+		  onPttStart: () => this.onPttStart(),
+		  onPttEnd: () => this.onPttEnd(),
+		  onAudioMonitorStart: () => this.onAudioMonitorStart(),
+		  onAudioMonitorStop: () => this.onAudioMonitorStop(),
+    };
+	const thermalNavCallbacks = isG1Family(cloudApi.connectFamily)
+	  ? {}
+	  : {
+		onThermalStart: () => this.ThermalSystemConnect(),
+		onThermalStop: () => this.ThermalSystemDisconnect(),
+	}
     this.navBar = new NavBar(this.controlUi, () => this.goToHub(), this.errorStore, {
       onMenuClick: () => this.openSettingsDrawer(),
-      ...audioNavCallbacks,
+	  useThermal: this.useThermalCam,
+      ...audioNavCallbacks, ...thermalNavCallbacks
     });
 
     // PIP camera. The PIP bubble swaps the 3D scene and the camera between
@@ -570,6 +600,17 @@ export class App {
       }
       this.pipCamera.setOnTap(() => this.toggleViewMode());
     }
+
+	// creation of thermal PIP and gimbal client and setting streams
+	// todo: toggleviewmode
+	if(cloudApi.connectFamily === "Go2" && this.useThermalCam){
+	  this.pipThermal = new PipThermal(this.controlUi);
+	  if (this.thermalStream) {
+		this.pipThermal.setStream(this.thermalStream);
+	  }
+	  //this.pipThermal.setOnTap(() => this.toggleViewMode());
+	  this.gimbalClient = new GimbalClient()
+	}
 
     // Settings drawer — mounted on document.body so the slide-in
     // animation isn't clipped by the control overlay.
@@ -753,6 +794,7 @@ export class App {
         onUploadFile: (file: File, onProgress: (pct: number) => void) =>
           this.handleAudioUpload(file, onProgress),
       },
+	  onGimbalMove: (pan: number, tilt:number) => {this.gimbalClient?.move({ pan:pan, tilt:tilt })},
     };
   }
 
@@ -897,6 +939,9 @@ export class App {
     this.stopBgNoise();
     this.pipCamera?.destroy();
     this.pipCamera = null;
+		this.pipThermal?.destroy();// This may fuck shit
+		this.pipThermal = null;
+		// todo: destroy gimbal listeners here
     this.navBar = null;
     this.actionBar = null;
     this.settingsDrawer?.destroy();
@@ -1034,6 +1079,7 @@ export class App {
       threeCanvas.style.display = 'block';
       this.videoBg.srcObject = null;
       this.pipCamera?.showCamera();
+	  this.pipThermal?.showCamera();
     } else {
       // Main: camera feed, PIP: 3D voxel map mirrored
       if (this.videoStream) {
@@ -2541,19 +2587,19 @@ export class App {
         if (this.viewMode === 'video' && this.videoBg) {
           this.videoBg.srcObject = stream;
           this.videoBg.style.display = 'block';
-          if (this.noiseBgCanvas) this.noiseBgCanvas.style.display = 'none';
-          this.stopBgNoise();
-        }
-      },
-      onAudioTrack: (stream: MediaStream) => {
-        if (!this.audioEl) {
-          this.audioEl = document.createElement('audio');
-          this.audioEl.style.cssText = 'position:absolute;width:0;height:0;opacity:0;';
-          document.body.appendChild(this.audioEl);
-        }
-        this.audioEl.srcObject = stream;
-      },
-    };
+		  if (this.noiseBgCanvas) this.noiseBgCanvas.style.display = 'none';
+		  this.stopBgNoise();
+		}
+	  },
+	  onAudioTrack: (stream: MediaStream) => {
+		if (!this.audioEl) {
+		  this.audioEl = document.createElement('audio');
+		  this.audioEl.style.cssText = 'position:absolute;width:0;height:0;opacity:0;';
+		  document.body.appendChild(this.audioEl);
+		}
+		this.audioEl.srcObject = stream;
+	  },
+	};
 
     const onStep = (msg: string) => this.connectionPanel?.setStatus(msg, 'info');
 
@@ -2570,6 +2616,7 @@ export class App {
           sn: config.serialNumber,
           promptKey: (sn, opts) => promptAesKey(sn, opts),
         });
+		await this.ThermalSystemConnect(onStep);
       }
       this.dataHandler = new DataChannelHandler(this.webrtc, callbacks);
       // Wire the error-message handler immediately — the robot sends its first
@@ -2821,10 +2868,82 @@ export class App {
       { label: `permission_net/set ${enabled ? 'on' : 'off'}` },
     );
   }
+  private ThermalSystemDisconnect() {
+	if (this.thermalwebrtc !== null){
+	  this.thermalwebrtc.close();
+	  this.thermalwebrtc = null;
+	}
+	if(this.pipThermal !== null){
+	  this.pipThermal.destroy()
+	  this.pipThermal = null;
+	}
+	this.thermalStream = null;
+	if(this.gimbalClient !== null){
+	  this.gimbalClient.disconnect();
+	  this.gimbalClient = null;
+	}
+  }
+  private async ThermalSystemConnect(Onstep?: (msg: string) => void ): Promise<void>{
+
+	console.log("connecting to thermal");
+	const thermalcallbacks: ConnectionCallbacks = {
+	  onStateChange: () => {},
+	  onValidated:  () => {
+		Onstep?.('Thermal Camera Connected!');
+		//this.showHubScreen();
+	  },
+	  //todo: this might be used to change the thermal pallettes
+	  onMessage: () => {},
+	  onVideoTrack: (stream: MediaStream) => {
+		Onstep?.('Thermal Video Received!');
+		this.thermalStream = stream;
+		this.pipThermal?.setStream(stream);
+	  },
+	  onAudioTrack: () => {},
+
+	};
+	Onstep?.('Connecting to thermal camera...');
+
+	if(this.connectionConfig?.mode === "STA-L" && this.connectionConfig?.thermal ){
+	  this.useThermalCam = true;
+	  this.thermalwebrtc = new ThermalWebRTCConnection(thermalcallbacks);
+	  await this.thermalwebrtc.Connect();
+	  this.thermalwebrtc.onThermalData = (d) => {
+		this.pipThermal?.updateStats(d);
+	  };
+	}
+
+	if(cloudApi.connectFamily === "Go2" && this.controlUi !== null ){
+	  if (this.pipThermal === null){
+		this.pipThermal = new PipThermal(this.controlUi);
+		if (this.thermalStream) {
+		  this.pipThermal.setStream(this.thermalStream);
+		}
+	  }
+	  //this.pipThermal.setOnTap(() => this.toggleViewMode());
+	}
+	if(this.gimbalClient === null){
+	  this.gimbalClient = new GimbalClient()
+	}
+
+  }
+
+  private GimbalStart(){
+	if (this.gimbalClient === null){
+	  this.gimbalClient = new GimbalClient()
+	}
+	
+  }
 
   private disconnect(): void {
     const wasRemote = this.connectionConfig?.mode === 'STA-T';
 
+		//destroying handlers todo: gimbal listener
+		this.pipThermal?.destroy();
+		this.thermalwebrtc?.close();
+		this.thermalwebrtc = null;
+		this.gimbalClient?.disconnect();
+		this.gimbalClient = null;
     this.stopJoystickLoop();
     this.setActiveInputSource(null);
     this.stopBgNoise();
