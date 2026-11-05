@@ -30,16 +30,6 @@ def apply_cmap(gray8: np.ndarray, cmap_name: str) -> np.ndarray:
     rgba = cmap(gray8.astype(np.float32) / 255.0)
     return (rgba[:, :, :3] * 255).astype(np.uint8)
 
-def find_thermal_device(default=2):
-    for path in sorted(glob.glob("/dev/video*")):
-        try:
-            out = subprocess.check_output(
-                ["v4l2-ctl", "--device", path, "--all"], text=True, timeout=2)
-        except Exception:
-            continue
-        if "PureThermal" in out and "Y16" in out:
-            return int(path.replace("/dev/video", ""))
-    return default
 
 class ThermalTrack(VideoStreamTrack): # <-- Inherit from VideoStreamTrack
     kind = "video"
@@ -59,9 +49,9 @@ class ThermalTrack(VideoStreamTrack): # <-- Inherit from VideoStreamTrack
         self.cap.set(cv2.CAP_PROP_CONVERT_RGB, 0)
 
         if not self.cap.isOpened():
-            raise RuntimeError(f"Could not open /dev/video{device}")
+            raise RuntimeError(f"Could not open device: {device}")
 
-        print(f"Opened thermal camera on /dev/video{device}", flush=True)
+        print(f"Opened thermal camera on device: {device}", flush=True)
 
     def set_palette(self, name: str):
         if name in PALETTE_NAMES:
@@ -157,7 +147,7 @@ async def offer(request):
         ]
     ))
     pc_id = str(id(pc))
-    track = ThermalTrack(find_thermal_device())
+    track = ThermalTrack("/dev/thermal")
 
     pc.addTrack(track)
 

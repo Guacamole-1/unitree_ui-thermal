@@ -16,7 +16,7 @@ export class GimbalBtn extends GenericBtn{
   private gimbalMouseMove: ((e: MouseEvent) => void) | null = null;
   private gimbalMouseDown: ((event: MouseEvent) => void) | null = null;
   private gimbalTimer: ReturnType<typeof setInterval> | null = null;
-  private gimbalPos = { pan: 0, tilt: 0 };
+  private gimbalPos = { pan: GIMBAL_MAX_ROT / 2, tilt: GIMBAL_MAX_ROT / 2 };
   private GimbalMove: ((pan: number, tilt:number) => void);
 
   constructor(GimbalMove: (pan: number, tilt:number) => void ) {
@@ -49,35 +49,26 @@ export class GimbalBtn extends GenericBtn{
   }
   private startMovement(){
 	this.setEvent("active");
-	this.gimbalPos.pan  = GIMBAL_MAX_ROT/2;
-    this.gimbalPos.tilt = GIMBAL_MAX_ROT/2;
 
     document.body.requestPointerLock();
 
     this.gimbalMouseMove = (event: MouseEvent) => {
       const sensitivity = 0.25;
-
-      this.gimbalPos.pan -=
-            event.movementX * sensitivity;
-
-      this.gimbalPos.tilt +=
-            event.movementY * sensitivity;
-
-      this.gimbalPos.pan = Math.max(
-        0,
-        Math.min(180, this.gimbalPos.pan),
-      );
-
-      this.gimbalPos.tilt = Math.max(
-        0,
-        Math.min(180, this.gimbalPos.tilt),
-      );
-
-      this.GimbalMove?.(
-        Math.round(this.gimbalPos.pan),
-        Math.round(this.gimbalPos.tilt),
-      );
+      this.gimbalPos.pan  = Math.max(0, Math.min(GIMBAL_MAX_ROT,
+        this.gimbalPos.pan - event.movementX * sensitivity));
+      this.gimbalPos.tilt = Math.max(0, Math.min(GIMBAL_MAX_ROT,
+        this.gimbalPos.tilt + event.movementY * sensitivity));
     };
+
+    let lastPan = -1, lastTilt = -1;
+    this.gimbalTimer = setInterval(() => {
+      const pan  = Math.round(this.gimbalPos.pan);
+      const tilt = Math.round(this.gimbalPos.tilt);
+      if (pan === lastPan && tilt === lastTilt) return;   // nothing changed
+      lastPan = pan; lastTilt = tilt;
+      this.GimbalMove(pan, tilt);
+    }, 50);
+
 
 	this.gimbalMouseDown = () => {
         document.exitPointerLock();
@@ -101,9 +92,6 @@ export class GimbalBtn extends GenericBtn{
 
   private stopMovement(){
 	this.setEvent("default");
-    if (document.pointerLockElement) {
-      document.exitPointerLock();
-    }
 	this.removeGimbalListeners();
   }
 
@@ -120,6 +108,7 @@ export class GimbalBtn extends GenericBtn{
 
   destroy(): void {
 	this.setEvent("default");
+	if (document.pointerLockElement) document.exitPointerLock();
 	this.removeGimbalListeners();
   }
 

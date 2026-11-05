@@ -50,7 +50,7 @@ import {GimbalClient} from '../connection/gimbal'
 		- thermal camera and gimbal connection on main screen
 	SHIT TO DO:
 		- remote connection
-		- remote control
+		- remote control (add custom buttons for gimbal)
 		- add on state change to thermalwebrtc
 		- gimbal check connection and reconnect (to be done on client and server)
 		- change temperature pallette normalization ( relative, absolute and smooth auto)
@@ -2590,7 +2590,22 @@ export class App {
         this.connectionPanel?.setStatus('Validated!', 'success');
         setTimeout(() => {
           this.enableVideoAndSubscribe();
-          this.showHubScreen();
+          void (async () => {
+            if (config.mode === 'STA-L') {
+              try {
+                await this.ThermalSystemConnect(onStep);
+              } catch (err) {
+                log.ui.warn('[thermal] connect failed, continuing without it:', err);
+                this.ThermalSystemDisconnect();
+                this.connectionPanel?.setStatus(
+                  `Thermal camera unavailable: ${err instanceof Error ? err.message : String(err)}`,
+                  'error',
+                );
+                await new Promise((r) => setTimeout(r, 2500));  // let the user read it
+              }
+            }
+            this.showHubScreen();
+          })();
         }, 500);
       },
       onMessage: (msg: DataChannelMessage) => {
@@ -2640,9 +2655,6 @@ export class App {
       // the onValidated callback runs. Don't wait for validation here.
       this.dataHandler.onErrorMessage = (type, data) => this.errorStore.applyWireMessage(type, data);
 
-	  if(config.mode === 'STA-L'){
-		await this.ThermalSystemConnect(onStep);
-	  }
 
     } catch (err) {
       const raw = err instanceof Error ? err.message : 'Connection failed';
@@ -2650,7 +2662,6 @@ export class App {
       this.connectionPanel?.setConnecting(false);
       this.webrtc?.close();
       this.webrtc = null;
-	  this.ThermalSystemDisconnect();
     }
   }
 
@@ -2913,15 +2924,9 @@ export class App {
 		!this.thermalConnecting &&
 		this.connectionConfig?.mode === "STA-L" &&
 		this.connectionConfig?.thermal;
-    // Idempotent — a live or in-flight connection means there is nothing to do
-    // but make sure the PIP exists for the current control view.
-    if (this.thermalwebrtc !== null || this.thermalConnecting) {
-      this.ensureThermalPip();
-      return;
-    }
 
-    Onstep?.('Connecting to thermal camera...');
 	if (needsConnect) {
+      Onstep?.('Connecting to thermal camera...');
 	  const thermalcallbacks: ConnectionCallbacks = {
 		onStateChange: () => {},
 		onValidated:  () => {
@@ -2953,12 +2958,13 @@ export class App {
         this.thermalConnecting = false;
       }
     }
-
 	// Always — covers both "just connected" and "already connected".
     this.ensureThermalPip();
     if (this.gimbalClient === null) {
-      this.gimbalClient = new GimbalClient();
+	  this.gimbalClient = new GimbalClient();
     }
+
+
   }
 
 
@@ -2989,12 +2995,9 @@ export class App {
   private disconnect(): void {
 	const wasRemote = this.connectionConfig?.mode === 'STA-T';
 
-	//destroying handlers todo: gimbal listener
-	this.pipThermal?.destroy();
-	this.thermalwebrtc?.close();
-	this.thermalwebrtc = null;
-	this.gimbalClient?.disconnect();
-	this.gimbalClient = null;
+	this.ThermalSystemDisconnect();
+	this.navBar?.destroy()
+    this.controlUi = null;
     this.stopJoystickLoop();
     this.setActiveInputSource(null);
     this.stopBgNoise();
