@@ -233,7 +233,7 @@ export class ConnectionPanel {
     // Go2 firmware doesn't gate multicast replies on the SN field, so the
     // regular Scan button is sufficient there.
     const snRow = this.container.querySelector('#scan-sn-row') as HTMLElement | null;
-    if (snRow) snRow.style.display = (!isRemote && isG1Family(cloudApi.connectFamily)) ? '' : 'none';
+	if (snRow !== null) {snRow.style.display = !isRemote ? '' : 'none';}
     this.robotPickerGroup.style.display = isRemote && cloudApi.isLoggedIn && this.devices.length > 1 ? '' : 'none';
 
     // Inline hint under the mode selector covers the remaining cases:

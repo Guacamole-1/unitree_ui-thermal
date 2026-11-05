@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 from aiohttp import web
 import os
+import glob, subprocess
 # Use VideoStreamTrack instead of MediaStreamTrack
 from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack, RTCConfiguration, RTCIceServer
 from av import VideoFrame
@@ -28,6 +29,17 @@ def apply_cmap(gray8: np.ndarray, cmap_name: str) -> np.ndarray:
     cmap = Cmaps[cmap_name]
     rgba = cmap(gray8.astype(np.float32) / 255.0)
     return (rgba[:, :, :3] * 255).astype(np.uint8)
+
+def find_thermal_device(default=2):
+    for path in sorted(glob.glob("/dev/video*")):
+        try:
+            out = subprocess.check_output(
+                ["v4l2-ctl", "--device", path, "--all"], text=True, timeout=2)
+        except Exception:
+            continue
+        if "PureThermal" in out and "Y16" in out:
+            return int(path.replace("/dev/video", ""))
+    return default
 
 class ThermalTrack(VideoStreamTrack): # <-- Inherit from VideoStreamTrack
     kind = "video"
@@ -88,8 +100,8 @@ class ThermalTrack(VideoStreamTrack): # <-- Inherit from VideoStreamTrack
             cv2.drawMarker(rgb, (cx, cy), (255, 255, 255), cv2.MARKER_CROSS, 5, 1)
             cv2.drawMarker(rgb, (max_pos[1], max_pos[0]), (255, 80, 80), cv2.MARKER_TILTED_CROSS, 5, 1)
 
-            # as camera is upside down
-            rgb = cv2.flip(rgb, 0)
+            # as camera is upside down in both axis
+            rgb = cv2.flip(rgb, -1)
 
             # 3. UPSCALING (The "Tkinter Secret")
             # We upscale to 640x480 using INTER_NEAREST. 
@@ -145,7 +157,7 @@ async def offer(request):
         ]
     ))
     pc_id = str(id(pc))
-    track = ThermalTrack()
+    track = ThermalTrack(find_thermal_device())
 
     pc.addTrack(track)
 
@@ -156,7 +168,6 @@ async def offer(request):
         async def push_stats():
             while True:
                 if channel.readyState == "open":
-                    # Check if track exists and hasn't been closed
                     channel.send(json.dumps(track.latest_stats()))
                 elif channel.readyState in ("closing", "closed"):
                     break

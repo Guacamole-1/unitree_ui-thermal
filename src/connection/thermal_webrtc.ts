@@ -7,8 +7,13 @@ export type ThermalPalette =
 	| 'rainbow'	| 'rainbow_hc'	| 'viridis'
 	| 'white_hot';
 
-export type ThermalData = {center_c: number, min_c: number, max_c: number,
-                     min_pos: number, max_pos: number};
+export type ThermalData = {
+  center_c: number | null,
+  min_c: number | null,
+  max_c: number | null,
+  min_pos: [number, number] | null,
+  max_pos: [number, number] | null,
+};
 
 export class ThermalWebRTCConnection {
     channel: RTCDataChannel | null = null;
@@ -23,7 +28,7 @@ export class ThermalWebRTCConnection {
     constructor(callbacks: ConnectionCallbacks) {
         this.callbacks = callbacks;
         this.statsEl = document.getElementById("stats") as HTMLElement;
-        this.currentPalette = 'white_hot';
+        this.currentPalette = 'ironbow';
 	    console.log("thermal camera created")
         this.setupPeerConnection();
 		//this.start();
@@ -142,7 +147,6 @@ export class ThermalWebRTCConnection {
 
         channel.onmessage = (event) => {
             const d: ThermalData = JSON.parse(event.data as string);
-			console.log("abc")
 		    this.onThermalData?.(d);
         };
     }

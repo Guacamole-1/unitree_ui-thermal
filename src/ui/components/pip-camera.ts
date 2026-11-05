@@ -9,7 +9,8 @@ export class PipCamera {
   protected noiseAnimId = 0;
   protected hasStream = false;
   protected currentContent: PipContent = 'camera';
-
+  protected onPointerMoveBound = (e: PointerEvent) => this.onPointerMove(e);
+  protected onPointerUpBound = () => this.onPointerUp();
   // Mini 3D canvas placeholder (will be populated by scene)
   protected miniCanvas: HTMLCanvasElement | null = null;
 
@@ -58,9 +59,8 @@ export class PipCamera {
 
 		// Drag handlers
 		this.container.addEventListener('pointerdown', (e) => this.onPointerDown(e));
-		window.addEventListener('pointermove', (e) => this.onPointerMove(e));
-		window.addEventListener('pointerup', () => this.onPointerUp());
-
+	  window.addEventListener('pointermove', this.onPointerMoveBound);
+      window.addEventListener('pointerup', this.onPointerUpBound);
 		parent.appendChild(this.container);
 
 		// Start white noise animation
@@ -238,5 +238,9 @@ export class PipCamera {
   destroy(): void {
     this.stopNoise();
     this.stopMiniCanvasMirror();
+	window.removeEventListener('pointermove', this.onPointerMoveBound);
+    window.removeEventListener('pointerup', this.onPointerUpBound);
+    this.videoEl.srcObject = null;
+    this.container.remove();
   }
 }

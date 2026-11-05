@@ -20,8 +20,12 @@ export class PipThermal extends PipCamera{
   }
 
   updateStats(data: ThermalData): void {
-	this.statsOverlay.textContent =
-		`center: ${data.center_c.toFixed(2)} °C ` +
+    if (data.center_c === null || data.min_c === null || data.max_c === null) {
+      this.statsOverlay.textContent = 'No Data';
+      return;
+    }
+    this.statsOverlay.textContent =
+      `center: ${data.center_c.toFixed(2)} °C ` +
 		`min: ${data.min_c.toFixed(2)} °C ` +
 		`max: ${data.max_c.toFixed(2)} °C `;
   }

@@ -57,8 +57,8 @@ export interface NavBarOptions {
   onAudioMonitorStop?: () => void;
   useThermal?: boolean;
   onGimbalStart?: () => void;
-  onGimbalMove?: () => void;
-  onThermalStart?: () => void;
+  onGimbalMove?: (pan: number, tilt: number) => void;
+  onThermalStart?: () => void | Promise<void>;
   onGimbalStop?: () => void;
   onThermalStop?: () => void;
 
@@ -158,10 +158,16 @@ export class NavBar {
     }
 	// gimbal control
 	if(this.options.useThermal){
-	  this.gimbalBtn = new GimbalBtn(this.options.onGimbalMove!);
+	  this.gimbalBtn = new GimbalBtn((pan, tilt) => {
+		this.options.onGimbalMove?.(pan, tilt);
+	  });
 	  rightSlot.appendChild(this.gimbalBtn.element);
 
-	  this.thermalBtn = new ThermalBtn(this.options.onThermalStart);
+	  this.thermalBtn = new ThermalBtn(
+				this.options.onThermalStart,
+				this.options.onThermalStop,
+				true,
+			  );
 	  rightSlot.appendChild(this.thermalBtn.element);
 	}
 
@@ -214,6 +220,10 @@ export class NavBar {
     this.audioMonitor = null;
     this.audioPtt?.destroy();
     this.audioPtt = null;
+	this.gimbalBtn?.destroy();
+	this.gimbalBtn = null;
+	this.thermalBtn = null;
+
   }
 
 

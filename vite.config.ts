@@ -8,7 +8,8 @@ export default defineConfig({
   },
   plugins: [robotProxyPlugin()],
   server: {
-	// host: 0.0.0.0 // host available to the whole LAN
+	allowedHosts: true,
+	host: "0.0.0.0",// host available to the whole LAN
 	// Single unified WebSocket upgrade proxy for the BLE backend
 	// (HTTP paths still go through robotProxyPlugin)
 	proxy: {
@@ -21,7 +22,7 @@ export default defineConfig({
 		target: 'http://127.0.0.1:8080',
 		changeOrigin: true,
 	  },
-	  'gimbal/ws': {
+	  '/gimbal/ws': {
 		target: 'ws://127.0.0.1:5052',
 		ws: true,
 	  }

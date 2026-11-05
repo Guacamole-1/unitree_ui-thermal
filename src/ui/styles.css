@@ -4057,3 +4057,22 @@ input:disabled + span {
 input:disabled {
 	cursor: not-allowed;
 }
+
+
+/*Thermal pallette */
+.palette-popup {
+	display: grid;
+	grid-template-columns: repeat(2, 96px);
+	gap: 8px;
+	max-height: 260px;
+	overflow-y: auto;
+}
+.palette-swatch { padding: 0; background: none; border: 2px solid transparent;
+    border-radius: 7px; cursor: pointer; overflow: hidden; }
+.palette-swatch:hover { border-color: #4a4d55; }
+.palette-swatch.on { border-color: #4fc3f7; }
+.palette-bar { height: 26px; border-radius: 4px 4px 0 0; }
+.palette-cap { font-size: 10px; color: #aaa; padding: 4px 2px; background: #0a0c10;
+    border-radius: 0 0 4px 4px; text-align: center;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.palette-swatch.on .palette-cap { color: #4fc3f7; }

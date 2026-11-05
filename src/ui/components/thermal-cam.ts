@@ -12,15 +12,19 @@ font-family="sans-serif" font-weight="700" fill="currentColor">ºC</text>
 
 export class ThermalBtn extends GenericBtn{
 
-  onThermalStart: undefined | (()=>void);
+  onThermalStart: undefined | (() => void | Promise<void>);
   onThermalStop : undefined | (()=>void);
 
-  constructor(onThermalStart?: ()=> void, onThermalStop?: ()=> void ) {
-	super(THERMAL_SVG,"#b0b3bb")
-	this.onThermalStart = onThermalStart;
-	this.onThermalStop= onThermalStop;
-	this.setupEventHandlers();
-  }
+ constructor(onThermalStart?: () => void | Promise<void>,
+			  onThermalStop?: () => void,
+			  initiallyActive = false,) {
+
+   super(THERMAL_SVG,"#b0b3bb")
+   this.onThermalStart = onThermalStart;
+   this.onThermalStop= onThermalStop;
+   this.setupEventHandlers();
+   if (initiallyActive) this.setEvent("active");
+ }
 
 
   private setupEventHandlers(){
@@ -32,18 +36,25 @@ export class ThermalBtn extends GenericBtn{
 	  this.setEvent("mouseleave")
     });
 
-	this.element.addEventListener('click', (e: PointerEvent) => {
+	this.element.addEventListener('click', async (e: MouseEvent) => {
       if (e.button !== 0) return; // left button only
       e.preventDefault();
+	  if (this.isActive === "loading") return;
+
 	  if(this.isActive === false){
-		this.setEvent("active");
-		this.onThermalStart?.();
-		//this.startMovement();
-		//this.setEvent("active");
+		this.setEvent("loading");
+		try {
+		  await this.onThermalStart?.();
+		  this.setEvent("active");
+		} catch (err) {
+		  console.error('[thermal] Failed to start:', err);
+		  this.setEvent("error");
+		}
 	  }else{
-		//this.stopMovement();
+		this.onThermalStop?.();
+		this.setEvent("default");
 	  }
-    });
+	});
 
   }
 }

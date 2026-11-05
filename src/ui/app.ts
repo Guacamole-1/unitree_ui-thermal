@@ -38,19 +38,26 @@ import type { WebRTCConnection } from '../connection/webrtc';
 import type { Scene3D } from './scene/scene';
 
 // thermal imports
-import { ThermalWebRTCConnection } from '../connection/thermal_webrtc';
+import { ThermalPalette, ThermalWebRTCConnection } from '../connection/thermal_webrtc';
 import { PipThermal } from './components/pip-thermal';
 import {GimbalClient} from '../connection/gimbal'
 
 /*
+	filipe.barata - camera termica e laser
+	fazer paper
+
 	SHIT TO TEST:
 		- thermal camera and gimbal connection on main screen
 	SHIT TO DO:
-		- gimbal check connection and reconnect (to be done on client)
-		- thermal pallettes
+		- remote connection
+		- remote control
+		- add on state change to thermalwebrtc
+		- gimbal check connection and reconnect (to be done on client and server)
+		- change temperature pallette normalization ( relative, absolute and smooth auto)
 		- create a separate gimbal func
-		- make gimbal and thermal btns work
-
+		- put gimbal sensitivity in settings
+		- put force disconnect on gimbal
+		- save thermal telemetry
  */
 
 type Screen = 'landing' | 'connection' | 'hub' | 'control' | 'status' | 'services' | 'settings' | 'app-settings' | 'mapping' | 'account' | 'bt' | 'errors' | 'teaching';
@@ -111,6 +118,7 @@ export class App {
   // thermal UI components
   private pipThermal: PipThermal | null = null;
   private useThermalCam: boolean = false;
+  private thermalConnecting = false;
   // Control-view chrome: the settings icon in the navbar opens this
   // drawer, which also hosts BT-remote / gamepad selection (replaces
   // the old SettingBar and the standalone input-source picker).
@@ -156,6 +164,8 @@ export class App {
     internetRemoteOn: false,
     inputSources: [],
     activeInputSourceId: null,
+	thermalOn: false,
+    activePalette: 'ironbow',
   };
   private mappingPage: MappingPage | null = null;
   private accountPage: AccountPage | null = null;
@@ -316,9 +326,9 @@ export class App {
       }
     });
     window.addEventListener('beforeunload', () => this.gamepadManager?.destroy());
-
-    //this.showLandingScreen();
-	this.showControlUi();
+    this.showLandingScreen();
+	//DEBUG
+	//this.showControlUi();
   }
 
   // ── Screen Navigation ──
@@ -577,11 +587,15 @@ export class App {
 		  onAudioMonitorStart: () => this.onAudioMonitorStart(),
 		  onAudioMonitorStop: () => this.onAudioMonitorStop(),
     };
-	const thermalNavCallbacks = isG1Family(cloudApi.connectFamily)
+	const thermalNavCallbacks = (isG1Family(cloudApi.connectFamily) || !this.useThermalCam)
 	  ? {}
 	  : {
-		onThermalStart: () => this.ThermalSystemConnect(),
+		onThermalStart: () => this.ThermalSystemConnect().catch((err) => console.error('[thermal] attach failed:', err)),
 		onThermalStop: () => this.ThermalSystemDisconnect(),
+		onGimbalMove: (pan: number, tilt: number) => {
+		  this.gimbalClient?.move({ pan, tilt });
+		},
+
 	}
     this.navBar = new NavBar(this.controlUi, () => this.goToHub(), this.errorStore, {
       onMenuClick: () => this.openSettingsDrawer(),
@@ -603,14 +617,11 @@ export class App {
 
 	// creation of thermal PIP and gimbal client and setting streams
 	// todo: toggleviewmode
-	if(cloudApi.connectFamily === "Go2" && this.useThermalCam){
-	  this.pipThermal = new PipThermal(this.controlUi);
-	  if (this.thermalStream) {
-		this.pipThermal.setStream(this.thermalStream);
-	  }
-	  //this.pipThermal.setOnTap(() => this.toggleViewMode());
-	  this.gimbalClient = new GimbalClient()
-	}
+    if (cloudApi.connectFamily === "Go2" && this.useThermalCam) {
+      // The previous controlUi was just discarded — drop any PIP bound to it.
+	  void this.ThermalSystemConnect()
+        .catch((err) => console.error('[thermal] attach failed:', err));
+    }
 
     // Settings drawer — mounted on document.body so the slide-in
     // animation isn't clipped by the control overlay.
@@ -795,6 +806,7 @@ export class App {
           this.handleAudioUpload(file, onProgress),
       },
 	  onGimbalMove: (pan: number, tilt:number) => {this.gimbalClient?.move({ pan:pan, tilt:tilt })},
+      onPaletteSet: (name:ThermalPalette) => this.thermalwebrtc?.setPalette(name),
     };
   }
 
@@ -939,10 +951,14 @@ export class App {
     this.stopBgNoise();
     this.pipCamera?.destroy();
     this.pipCamera = null;
-		this.pipThermal?.destroy();// This may fuck shit
-		this.pipThermal = null;
-		// todo: destroy gimbal listeners here
+	// destroy gimbal listeners
+	this.pipThermal?.destroy();
+	this.pipThermal = null;
+	this.gimbalClient?.disconnect();
+	this.gimbalClient = null;
+	this.navBar?.destroy();
     this.navBar = null;
+	this.controlUi = null;
     this.actionBar = null;
     this.settingsDrawer?.destroy();
     this.settingsDrawer = null;
@@ -2616,19 +2632,25 @@ export class App {
           sn: config.serialNumber,
           promptKey: (sn, opts) => promptAesKey(sn, opts),
         });
-		await this.ThermalSystemConnect(onStep);
       }
       this.dataHandler = new DataChannelHandler(this.webrtc, callbacks);
-      // Wire the error-message handler immediately — the robot sends its first
+
+	  // Wire the error-message handler immediately — the robot sends its first
       // "errors" snapshot the same tick as "Validation Ok.", which is BEFORE
       // the onValidated callback runs. Don't wait for validation here.
       this.dataHandler.onErrorMessage = (type, data) => this.errorStore.applyWireMessage(type, data);
+
+	  if(config.mode === 'STA-L'){
+		await this.ThermalSystemConnect(onStep);
+	  }
+
     } catch (err) {
       const raw = err instanceof Error ? err.message : 'Connection failed';
       this.connectionPanel?.setStatus(friendlyConnectError(raw), 'error');
       this.connectionPanel?.setConnecting(false);
       this.webrtc?.close();
       this.webrtc = null;
+	  this.ThermalSystemDisconnect();
     }
   }
 
@@ -2869,6 +2891,7 @@ export class App {
     );
   }
   private ThermalSystemDisconnect() {
+	this.useThermalCam = false;
 	if (this.thermalwebrtc !== null){
 	  this.thermalwebrtc.close();
 	  this.thermalwebrtc = null;
@@ -2882,50 +2905,78 @@ export class App {
 	  this.gimbalClient.disconnect();
 	  this.gimbalClient = null;
 	}
+	this.setThermalOn(false);
   }
   private async ThermalSystemConnect(Onstep?: (msg: string) => void ): Promise<void>{
+	const needsConnect =
+      this.thermalwebrtc === null &&
+		!this.thermalConnecting &&
+		this.connectionConfig?.mode === "STA-L" &&
+		this.connectionConfig?.thermal;
+    // Idempotent — a live or in-flight connection means there is nothing to do
+    // but make sure the PIP exists for the current control view.
+    if (this.thermalwebrtc !== null || this.thermalConnecting) {
+      this.ensureThermalPip();
+      return;
+    }
 
-	console.log("connecting to thermal");
-	const thermalcallbacks: ConnectionCallbacks = {
-	  onStateChange: () => {},
-	  onValidated:  () => {
-		Onstep?.('Thermal Camera Connected!');
-		//this.showHubScreen();
-	  },
-	  //todo: this might be used to change the thermal pallettes
-	  onMessage: () => {},
-	  onVideoTrack: (stream: MediaStream) => {
-		Onstep?.('Thermal Video Received!');
-		this.thermalStream = stream;
-		this.pipThermal?.setStream(stream);
-	  },
-	  onAudioTrack: () => {},
+    Onstep?.('Connecting to thermal camera...');
+	if (needsConnect) {
+	  const thermalcallbacks: ConnectionCallbacks = {
+		onStateChange: () => {},
+		onValidated:  () => {
+		  Onstep?.('Thermal Camera Connected!');
+		  this.setThermalOn(true);
+		  //this.showHubScreen();
+		},
+		onMessage: () => {},
+		onVideoTrack: (stream: MediaStream) => {
+		  Onstep?.('Thermal Video Received!');
+		  this.thermalStream = stream;
+		  this.pipThermal?.setStream(stream);
+		},
+		onAudioTrack: () => {},
 
-	};
-	Onstep?.('Connecting to thermal camera...');
-
-	if(this.connectionConfig?.mode === "STA-L" && this.connectionConfig?.thermal ){
-	  this.useThermalCam = true;
-	  this.thermalwebrtc = new ThermalWebRTCConnection(thermalcallbacks);
-	  await this.thermalwebrtc.Connect();
-	  this.thermalwebrtc.onThermalData = (d) => {
-		this.pipThermal?.updateStats(d);
 	  };
-	}
+      this.thermalConnecting = true;
+      try {
+        this.useThermalCam = true;
+        this.thermalwebrtc = new ThermalWebRTCConnection(thermalcallbacks);
+        await this.thermalwebrtc.Connect();
+        this.thermalwebrtc.onThermalData = (d) => this.pipThermal?.updateStats(d);
+      } catch (err) {
+        this.thermalwebrtc?.close();
+        this.thermalwebrtc = null;
+        this.useThermalCam = false;
+        throw err;
+      } finally {
+        this.thermalConnecting = false;
+      }
+    }
 
-	if(cloudApi.connectFamily === "Go2" && this.controlUi !== null ){
-	  if (this.pipThermal === null){
-		this.pipThermal = new PipThermal(this.controlUi);
-		if (this.thermalStream) {
-		  this.pipThermal.setStream(this.thermalStream);
-		}
-	  }
-	  //this.pipThermal.setOnTap(() => this.toggleViewMode());
-	}
-	if(this.gimbalClient === null){
-	  this.gimbalClient = new GimbalClient()
-	}
+	// Always — covers both "just connected" and "already connected".
+    this.ensureThermalPip();
+    if (this.gimbalClient === null) {
+      this.gimbalClient = new GimbalClient();
+    }
+  }
 
+
+  private setThermalOn(on: boolean): void {
+    this.settingsState.thermalOn = on;
+    this.settingsPage?.setState({ thermalOn: on });
+    this.settingsDrawer?.setState({ thermalOn: on });
+  }
+  /** Create the thermal PIP if it's wanted, possible, and not already there.
+   *  Safe to call repeatedly — both showControlUi and ThermalSystemConnect
+   *  reach it, in either order. */
+  private ensureThermalPip(): void {
+    if (cloudApi.connectFamily !== 'Go2') return;
+    if (this.controlUi === null) return;
+    if (this.pipThermal !== null) return;
+    this.pipThermal = new PipThermal(this.controlUi);
+    if (this.thermalStream) this.pipThermal.setStream(this.thermalStream);
+    // this.pipThermal.setOnTap(() => this.toggleViewMode());
   }
 
   private GimbalStart(){
@@ -2936,14 +2987,14 @@ export class App {
   }
 
   private disconnect(): void {
-    const wasRemote = this.connectionConfig?.mode === 'STA-T';
+	const wasRemote = this.connectionConfig?.mode === 'STA-T';
 
-		//destroying handlers todo: gimbal listener
-		this.pipThermal?.destroy();
-		this.thermalwebrtc?.close();
-		this.thermalwebrtc = null;
-		this.gimbalClient?.disconnect();
-		this.gimbalClient = null;
+	//destroying handlers todo: gimbal listener
+	this.pipThermal?.destroy();
+	this.thermalwebrtc?.close();
+	this.thermalwebrtc = null;
+	this.gimbalClient?.disconnect();
+	this.gimbalClient = null;
     this.stopJoystickLoop();
     this.setActiveInputSource(null);
     this.stopBgNoise();
@@ -2991,7 +3042,7 @@ export class App {
     this.settingsState = {
       radarOn: false, lidarOn: true, volume: 0, brightness: 0, waistLocked: false,
       remoteSwitchOn: false, remoteId: '', internetRemoteOn: false,
-      inputSources: [], activeInputSourceId: null,
+      inputSources: [], activeInputSourceId: null, thermalOn: false, activePalette: "ironbow"
     };
     if (this.serviceReportTimer) {
       clearInterval(this.serviceReportTimer);

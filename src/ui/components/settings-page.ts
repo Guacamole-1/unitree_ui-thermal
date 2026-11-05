@@ -2,6 +2,23 @@ import { isG1Family } from '../../api/unitree-cloud';
 import type { RobotFamily } from '../../api/unitree-cloud';
 import type { InputSource, InputSourceKind } from './side-buttons';
 import { AudioPlayer, type AudioPlayerCallbacks } from './audio-player';
+import type { ThermalPalette } from '../../connection/thermal_webrtc';
+
+const PALETTE_STOPS: Record<ThermalPalette, string[]> = {
+  afmhot:        ['#000000','#800000','#ff8000','#ffff81','#ffffff'],
+  arctic:        ['#003c96','#5bc2d1','#b67955','#fa7c4b','#faf0a9'],
+  black_hot:     ['#ebebeb','#b3b3b3','#7a7a7a','#424242','#0a0a0a'],
+  cividis:       ['#00224d','#434e6b','#7c7b78','#bbad6c','#fde737'],
+  ironbow:       ['#00000a','#8b009d','#e54419','#feb300','#fffff6'],
+  inferno:       ['#000003','#570f6d','#bb3754','#f98e08','#fcfea4'],
+  magma:         ['#000003','#50127b','#b63679','#fb8861','#fbfcbf'],
+  outdoor_alert: ['#f5f5f5','#a1a1a1','#4c4c4c','#911414','#fff9d2'],
+  plasma:        ['#0c0786','#7e03a7','#cb4777','#f89540','#eff821'],
+  rainbow:       ['#0000ff','#00ffbf','#7eff00','#ff4100','#ff00ed'],
+  rainbow_hc:    ['#000096','#00ef96','#a8f000','#ff2823','#fff8da'],
+  viridis:       ['#440154','#3a528b','#20908c','#5ec961','#fde724'],
+  white_hot:     ['#0a0a0a','#424242','#7a7a7a','#b2b2b2','#eaeaea'],
+};
 
 /** Robot speaker volume is stored 0–10; both official apps show it ×10 as a
  *  percentage (0 → "0%", 10 → "100%"). */
@@ -22,6 +39,11 @@ export interface SettingsState {
   /** ID of the active source (matches an entry in `inputSources`) or
    *  null when on-screen joysticks are driving. */
   activeInputSourceId: string | null;
+  /** Active thermal colour palette (matches the server's PALETTE_NAMES). */
+  activePalette: ThermalPalette;
+  /** Whether the thermal camera is currently connected. Hides the whole
+   *  Thermal Camera category when false. */
+  thermalOn: boolean;
 }
 
 export interface SettingsCallbacks {
@@ -48,6 +70,8 @@ export interface SettingsCallbacks {
    *  record / upload / list / play / loop / rename / delete). */
   audio?: AudioPlayerCallbacks;
   family?: RobotFamily;
+  /** Thermal camera colour palette. Section is only rendered when provided. */
+  onPaletteSet: (name: ThermalPalette) => void;
 }
 
 /**
@@ -89,6 +113,8 @@ export class SettingsPage {
    *  disconnects or the user picks something else). */
   private btRemoteLastActiveId: string | null = null;
   private audioPlayer: AudioPlayer | null = null;
+  private markPaletteSelected: (() => void) | null = null;
+  private thermalCategoryEl: HTMLElement | null = null;
 
   constructor(
     parent: HTMLElement,
@@ -190,6 +216,13 @@ export class SettingsPage {
       ));
       this.appendIfPopulated(content, navigation);
     }
+
+    // ── Thermal Camera ── hidden until the thermal camera connects.
+    const thermal = this.buildCategory('Thermal Camera');
+    thermal.appendChild(this.buildPaletteSection(callbacks.onPaletteSet));
+    this.thermalCategoryEl = thermal;
+    thermal.style.display = this.state.thermalOn ? '' : 'none';
+    this.appendIfPopulated(content, thermal);
 
     // ── Other Settings ── BT Remote (both families), waist lock (G1 only —
     // R1 has no waist motor and its Explorer app exposes no such control),
@@ -324,6 +357,16 @@ export class SettingsPage {
       this.state.activeInputSourceId = partial.activeInputSourceId;
       if (partial.activeInputSourceId) this.btRemoteLastActiveId = partial.activeInputSourceId;
       this.refreshBtRemoteSection();
+    }
+	if (partial.thermalOn !== undefined) {
+      this.state.thermalOn = partial.thermalOn;
+      if (this.thermalCategoryEl) {
+        this.thermalCategoryEl.style.display = partial.thermalOn ? '' : 'none';
+      }
+    }
+	if (partial.activePalette !== undefined) {
+      this.state.activePalette = partial.activePalette;
+      this.markPaletteSelected?.();
     }
   }
 
@@ -861,6 +904,74 @@ export class SettingsPage {
     const target = preferred ?? sources[0];
     this.btRemoteLastActiveId = target.id;
     this.callbacks.onInputSourceSelect?.(target.id);
+  }
+
+  /** Thermal palette picker — a grid of gradient swatches showing the actual
+   *  colour mapping, since the names ("ironbow", "rainbow_hc") say nothing
+   *  about what they look like. Sends {palette} on the thermal data channel. */
+  private buildPaletteSection(
+    onPaletteSet: (name: ThermalPalette) => void,
+  ): HTMLElement {
+    const section = document.createElement('div');
+    section.className = 'settings-section settings-section-slider';
+
+    const head = document.createElement('div');
+    head.className = 'settings-section-head';
+    const text = document.createElement('div');
+    text.className = 'settings-text';
+    const t = document.createElement('div');
+    t.className = 'settings-title';
+    t.textContent = 'Colour Palette';
+    text.appendChild(t);
+    const d = document.createElement('div');
+    d.className = 'settings-desc';
+    d.textContent = 'False-colour mapping applied to the thermal image.';
+    text.appendChild(d);
+    head.appendChild(text);
+    section.appendChild(head);
+
+    const grid = document.createElement('div');
+    grid.style.cssText =
+      'display:grid;grid-template-columns:repeat(auto-fill,minmax(98px,1fr));' +
+      'gap:8px;margin-top:12px;';
+
+    const swatchEls: HTMLButtonElement[] = [];
+    this.markPaletteSelected = () => {
+      swatchEls.forEach((el) => {
+        const on = el.dataset.palette === this.state.activePalette;
+        el.style.borderColor = on ? '#4fc3f7' : 'transparent';
+        const cap = el.querySelector('span');
+        if (cap) cap.style.color = on ? '#4fc3f7' : '#aaa';
+      });
+    };
+
+    for (const name of Object.keys(PALETTE_STOPS) as ThermalPalette[]) {
+      const sw = document.createElement('button');
+      sw.type = 'button';
+      sw.dataset.palette = name;
+      sw.title = name;
+      sw.setAttribute('aria-label', `Thermal palette ${name}`);
+      sw.style.cssText =
+        'padding:0;background:none;border:2px solid transparent;border-radius:7px;' +
+        'cursor:pointer;overflow:hidden;font:inherit;transition:border-color .12s;';
+      sw.innerHTML =
+        `<div style="height:26px;border-radius:4px 4px 0 0;` +
+        `background:linear-gradient(to right,${PALETTE_STOPS[name].join(',')})"></div>` +
+        `<span style="display:block;font-size:10px;color:#aaa;padding:4px 2px;` +
+        `background:#0a0c10;border-radius:0 0 4px 4px;text-align:center;` +
+        `white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${name}</span>`;
+      sw.addEventListener('click', () => {
+        this.state.activePalette = name;
+        this.markPaletteSelected?.();
+        onPaletteSet(name);
+      });
+      swatchEls.push(sw);
+      grid.appendChild(sw);
+    }
+
+    section.appendChild(grid);
+    this.markPaletteSelected();
+    return section;
   }
 }
 

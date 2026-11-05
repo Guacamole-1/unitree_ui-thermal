@@ -10,14 +10,16 @@ const GIMBAL_SVG = `<svg width="25" height="25" viewBox="0 0 24 24" fill="none" 
 <line x1="18" y1="12" x2="22" y2="12"/>
 </svg>`;
 
+const GIMBAL_MAX_ROT = 180;
 
 export class GimbalBtn extends GenericBtn{
   private gimbalMouseMove: ((e: MouseEvent) => void) | null = null;
+  private gimbalMouseDown: ((event: MouseEvent) => void) | null = null;
   private gimbalTimer: ReturnType<typeof setInterval> | null = null;
-  private gimbalPos = { x: 0, y: 0 };
+  private gimbalPos = { pan: 0, tilt: 0 };
   private GimbalMove: ((pan: number, tilt:number) => void);
 
-  constructor(GimbalMove: (pan: number, tilt:number) => void, ) {
+  constructor(GimbalMove: (pan: number, tilt:number) => void ) {
 	super(GIMBAL_SVG,"#b0b3bb")
 	this.GimbalMove = GimbalMove;
 	this.setupEventHandlers();
@@ -47,35 +49,84 @@ export class GimbalBtn extends GenericBtn{
   }
   private startMovement(){
 	this.setEvent("active");
-	// just update the stored position, no sending here
-	this.gimbalMouseMove = (e: MouseEvent) => {
-	  this.gimbalPos.x = e.clientX;
-	  this.gimbalPos.y = e.clientY;
-	};
-	this.gimbalTimer = setInterval(() => {
-	  const pan  = Math.round((this.gimbalPos.x / window.innerWidth)  * 180);
-	  const tilt = Math.round((this.gimbalPos.y / window.innerHeight) * 180);
-	  this.GimbalMove(
-		Math.max(0, Math.min(180, pan)),
-		Math.max(0, Math.min(180, tilt)),
-	  );
-	}, 50);
+	this.gimbalPos.pan  = GIMBAL_MAX_ROT/2;
+    this.gimbalPos.tilt = GIMBAL_MAX_ROT/2;
 
+    document.body.requestPointerLock();
+
+    this.gimbalMouseMove = (event: MouseEvent) => {
+      const sensitivity = 0.25;
+
+      this.gimbalPos.pan -=
+            event.movementX * sensitivity;
+
+      this.gimbalPos.tilt +=
+            event.movementY * sensitivity;
+
+      this.gimbalPos.pan = Math.max(
+        0,
+        Math.min(180, this.gimbalPos.pan),
+      );
+
+      this.gimbalPos.tilt = Math.max(
+        0,
+        Math.min(180, this.gimbalPos.tilt),
+      );
+
+      this.GimbalMove?.(
+        Math.round(this.gimbalPos.pan),
+        Math.round(this.gimbalPos.tilt),
+      );
+    };
+
+	this.gimbalMouseDown = () => {
+        document.exitPointerLock();
+    };
+
+    document.addEventListener(
+      'mousemove',
+      this.gimbalMouseMove,
+    );
+
+	document.addEventListener(
+      'mousedown',
+      this.gimbalMouseDown,
+    );
+
+	document.addEventListener(
+      'pointerlockchange',
+      this.handlePointerLockChange,
+	);
   }
+
   private stopMovement(){
 	this.setEvent("default");
+    if (document.pointerLockElement) {
+      document.exitPointerLock();
+    }
 	this.removeGimbalListeners();
   }
+
   private removeGimbalListeners(): void {
-	if (this.gimbalMouseMove)  document.removeEventListener('mousemove', this.gimbalMouseMove);
+	console.log("listeners deleted");
+	if (this.gimbalMouseMove)  {document.removeEventListener('mousemove', this.gimbalMouseMove);}
+	if (this.gimbalMouseDown) {document.removeEventListener('mousedown',this.gimbalMouseDown);}
 	if (this.gimbalTimer)      clearInterval(this.gimbalTimer);
+	document.removeEventListener('pointerlockchange',this.handlePointerLockChange);
 	this.gimbalMouseMove  = null;
 	this.gimbalTimer      = null;
+	this.gimbalMouseDown = null;
   }
 
   destroy(): void {
 	this.setEvent("default");
 	this.removeGimbalListeners();
   }
+
+  private handlePointerLockChange = (): void => {
+	if (document.pointerLockElement !== document.body) {
+	  this.stopMovement();
+	}
+  };
 
 }
