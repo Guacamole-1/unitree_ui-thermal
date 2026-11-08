@@ -1,15 +1,17 @@
-# Unitree WebRTC UI
+# Unitree WebRTC UI — Thermal Fork
 
 A browser-based control interface for **Unitree Go2**, **Unitree G1**, and **Unitree R1** robots, communicating over the same WebRTC connection the official mobile apps use. No jailbreak, no firmware modification, no phone app required.
 
-Built with TypeScript, Three.js, and Vite.
+**This fork extends [legion1581/unitree_ui](https://github.com/legion1581/unitree_ui) with a thermal inspection subsystem for the Unitree Go2.** It adds a separate thermal camera feed, live temperature readings, selectable thermal colour palettes, and control of a two-axis camera gimbal — all integrated into the existing web interface.
+
+Built with TypeScript, Three.js, Vite and Python.
 
 ![Status](https://img.shields.io/badge/status-stable-brightgreen)
 ![Browser](https://img.shields.io/badge/tested-Chrome-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-yellow.svg)
 
 <p align="center">
-  <img src="images/webview_go2.png" width="90%" />
+  <img src="images/interface_thermal.png" width="90%" />
 </p>
 
 <p align="center">
@@ -18,13 +20,28 @@ Built with TypeScript, Three.js, and Vite.
   <img src="images/connect_r1.png" width="32%" />
 </p>
 
+
+## Thermal Extension — What's New in This Fork?
+
+The additions in this fork are intended for **remote thermal inspection**, such as observing electrical or industrial equipment from a mobile robot:
+
+- **Live thermal video:** a second WebRTC connection streams a thermal camera feed independently of the Go2's built-in RGB camera.
+- **Thermal picture-in-picture:** the thermal feed appears in a separate window inside the robot control UI.
+- **Temperature telemetry:** — live **centre, minimum and maximum temperatures (°C)** supplied by the thermal backend are displayed over the thermal window.
+- **Thermal palettes:** switch between supported colour mappings (including Ironbow, White Hot, Black Hot and Inferno) from the interface.
+- **Two-axis gimbal control:** pan/tilt control through the browser, with commands sent via WebSocket to a Python servo server.
+
+The robot and thermal video streams are independent. The thermal video/telemetry service and gimbal controller are external components, rather than built-in Unitree robot features.
+
+> **Compatibility:** The thermal integration currently targets the **Go2 in Local Network (STA-L) mode**, with a separately configured thermal camera and backend. The original UI's G1 and R1 support is retained, but thermal support has not been implemented for those robots. The thermal integration is experimental.
+
 ## Supported Robots
 
-| Family | Firmware |
-|--------|----------|
-| **Go2** | 1.0.19 – 1.0.25, 1.1.1 – 1.1.15 *(latest)* |
-| **G1**  | 1.2.0 – 1.4.5, 1.5.1+ *(latest)* |
-| **R1**  | 1.4.2 *(latest)* |
+| Family | Firmware | Thermal Support|
+|--------|----------| -----|
+| **Go2** | 1.0.19 – 1.0.25, 1.1.1 – 1.1.15 *(latest)* | ✓ (STA-L)|
+| **G1**  | 1.2.0 – 1.4.5, 1.5.1+ *(latest)* | |
+| **R1**  | 1.4.2 *(latest)* | |
 
 R1 shares the humanoid control channel with G1, so it inherits the same modes,
 arm gestures, status panels and e-stop. Its own FSM state ids differ — Run rides
@@ -74,7 +91,32 @@ npm run build && npm run preview
 - Chrome (Firefox is experimental, Safari untested)
 - A Unitree Go2, G1, or R1 robot
 
+
+### Additional Setup for the Thermal Extension (Go2)
+
+The normal startup command starts the UI (and optionally BLE), **not** the thermal camera backend or gimbal service. To use the thermal subsystem, also configure:
+
+1. **Thermal WebRTC backend:** A separate camera service that implements WebRTC offer/ICE signalling and provides the thermal stream and temperature data. In `vite.config.ts`, `/thermal/*` is currently proxied to `http://127.0.0.1:8080`. The external thermal backend must be started and reachable separately.
+2. **Gimbal controller:** `server/servos.py` is a Raspberry Pi GPIO/FastAPI server for pan/tilt servo control. With the required Python libraries and hardware configured on the Raspberry Pi, start it using:
+
+   ```bash
+   python3 server/servos.py
+   ```
+
+   It listens on port **5052** (`/gimbal/ws`). Vite proxies this WebSocket path to `ws://127.0.0.1:5052` by default.
+3. **Network configuration:** If either backend runs on another machine, replace the corresponding `127.0.0.1` proxy target in `vite.config.ts` with that machine's reachable IP address. These addresses refer to the host running Vite, **not** the browser or robot.
+4. **Go2 connection:** Select **Local Network (STA-L)** for the Go2 and make sure the thermal backend is available. The thermal panel, temperature display, and gimbal controls then become available in the control interface.
+
 ## Features
+
+### Added by this fork
+
+- **Thermal video** — independent WebRTC thermal camera feed alongside the robot camera.
+- **Thermal measurements** — centre, minimum and maximum temperatures presented in the thermal picture-in-picture view.
+- **Thermal colour palettes** — selectable thermal image palette through the UI.
+- **Pan/tilt gimbal** — browser controls connected by WebSocket to a Python servo controller.
+
+### Original Unitree UI features
 
 - **Real-time 3D viewport** — robot model with live joint angles, lidar spinning animation, voxel point cloud (Go2 SLAM).
 - **Camera + dual joystick control** — PIP video, on-screen joysticks, action carousel for sport commands and modes. On R1 the bar mirrors the official app (Damping / Zero Torque / Lock / Run plus the arm gestures) and adds the dance and Kung Fu / Jeet Kune Do states.
@@ -112,30 +154,41 @@ npm run build && npm run preview
 
 ```
 src/
-  api/              # Unitree cloud API client (account, devices, firmware, …)
-  connection/       # WebRTC, local/remote connectors, network scanner
-  crypto/           # AES-ECB, RSA, AES-GCM for auth and SDP exchange
-  protocol/         # Data channel handler, topics, sport commands
+  api/                 # Unitree cloud API client (account, devices, firmware, …)
+  connection/          # WebRTC, local/remote connectors, network scanner
+    thermal_webrtc.ts  # Fork: thermal WebRTC video and temperature telemetry
+    gimbal.ts          # Fork: WebSocket gimbal client
+  crypto/              # AES-ECB, RSA, AES-GCM for auth and SDP exchange
+  protocol/            # Data channel handler, topics, sport commands
   ui/
-    components/     # Action bar, PIP camera, status/services/account pages, nav bar
-    scene/          # Three.js scene, robot model, voxel map
-  proxy-plugin.ts   # Vite plugin: robot proxy, scanner, cloud API, BLE API proxy
+    app.ts             # Robot control + thermal integration
+    components/        # Action bar, PIP camera, status/services/account pages, nav bar
+      pip-thermal.ts   # Fork: thermal PIP with temperature display
+      gimbal.ts        # Fork: mouse-controlled gimbal
+    scene/             # Three.js scene, robot model, voxel map
+  proxy-plugin.ts      # Vite plugin: robot proxy, scanner, cloud API, BLE API proxy
 public/
-  icons/            # Action and mode SVG icons
-  sprites/          # UI sprites and backgrounds
-  models/           # Go2.glb 3D model (the humanoids use the camera view)
+  icons/               # Action and mode SVG icons
+  sprites/             # UI sprites and backgrounds
+  models/              # Go2.glb 3D model (the humanoids use the camera view)
 server/
-  ble_server.py     # FastAPI BLE backend (scan, connect, WiFi config)
-  scanner.mjs       # Standalone UDP multicast scanner (optional)
+  ble_server.py        # FastAPI BLE backend (scan, connect, WiFi config)
+  servos.py            # Fork: Raspberry Pi gimbal server
+  scanner.mjs          # Standalone UDP multicast scanner (optional)
+vite.config.ts         # Thermal HTTP and gimbal WebSocket proxy configuration
 ```
 
 ## Acknowledgements
+
+**Original project:** [legion1581/unitree_ui](https://github.com/legion1581/unitree_ui). Thanks to the original author and contributors for the robot interface on which this fork is based.
+
+**This fork:** adds the thermal imaging interface, temperature readouts and gimbal integration.
 
 Big thanks to the [RoboLegion](https://robolegion.com) community.
 
 ## Support
 
-If you like this project, please consider buying me a coffee:
+If you like the  project, please consider supporting its upstream author:
 
 <a href="https://www.buymeacoffee.com/legion1581" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 60px !important;width: 217px !important;" ></a>
 
