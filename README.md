@@ -27,7 +27,7 @@ The additions in this fork are intended for **remote thermal inspection**, such 
 
 - **Live thermal video:** a second WebRTC connection streams a thermal camera feed independently of the Go2's built-in RGB camera.
 - **Thermal picture-in-picture:** the thermal feed appears in a separate window inside the robot control UI.
-- **Temperature telemetry:** — live **centre, minimum and maximum temperatures (°C)** supplied by the thermal backend are displayed over the thermal window.
+- **Temperature telemetry:**  live **centre, minimum and maximum temperatures (°C)** supplied by the thermal backend are displayed over the thermal window.
 - **Thermal palettes:** switch between supported colour mappings (including Ironbow, White Hot, Black Hot and Inferno) from the interface.
 - **Two-axis gimbal control:** pan/tilt control through the browser, with commands sent via WebSocket to a Python servo server.
 
@@ -40,8 +40,8 @@ The robot and thermal video streams are independent. The thermal video/telemetry
 | Family | Firmware | Thermal Support|
 |--------|----------| -----|
 | **Go2** | 1.0.19 – 1.0.25, 1.1.1 – 1.1.15 *(latest)* | ✓ (STA-L)|
-| **G1**  | 1.2.0 – 1.4.5, 1.5.1+ *(latest)* | |
-| **R1**  | 1.4.2 *(latest)* | |
+| **G1**  | 1.2.0 – 1.4.5, 1.5.1+ *(latest)* | ✗ |
+| **R1**  | 1.4.2 *(latest)* | ✗ |
 
 R1 shares the humanoid control channel with G1, so it inherits the same modes,
 arm gestures, status panels and e-stop. Its own FSM state ids differ — Run rides
